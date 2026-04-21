@@ -120,7 +120,7 @@ Start the validator and Watchtower:
 docker compose up -d
 ```
 
-- **Validator:** Docker pulls the image from Docker Hub (e.g. `vocence102/vocence:latest`) if it isn’t already on your machine, then runs it (`vocence serve` — sample generation + weight setting in one process).
+- **Validator:** Docker pulls the image from Docker Hub (e.g. `vocence78/vocence:latest`) if it isn’t already on your machine, then runs it (`vocence serve` — sample generation + weight setting in one process).
 - **Watchtower:** Polls Docker Hub every 5 minutes; when the team pushes a new image, it pulls and restarts the validator so you stay up to date without manual steps.
 
 ### How scoring works now
@@ -142,10 +142,10 @@ For the full scoring rules and winner-selection details, see [scoring.md](scorin
 
 ### Overriding the image (optional)
 
-Validators normally use `vocence102/vocence:latest`; the dev team’s CI pushes every new build as `latest`, and Watchtower updates you automatically. Override only if the team gives you a different image name:
+Validators normally use `vocence78/vocence:latest`; the dev team’s CI pushes every new build as `latest`, and Watchtower updates you automatically. Override only if the team gives you a different image name:
 
 ```bash
-DOCKER_IMAGE=vocence102/vocence:latest
+DOCKER_IMAGE=vocence78/vocence:latest
 ```
 
 Then run `docker compose up -d` as above.

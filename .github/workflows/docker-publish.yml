@@ -6,12 +6,12 @@
 # - Ignores docs/ and env.example: changes only to those do not trigger test or build.
 #
 # Setup (maintainers):
-#   1. Create a Docker Hub repository (e.g. vocence102/vocence)
+#   1. Create a Docker Hub repository (e.g. vocence78/vocence)
 #   2. Create an access token at https://hub.docker.com/settings/security (your *personal* account)
 #   3. Add GitHub Actions secrets (Settings > Secrets and variables > Actions):
 #      - DOCKERHUB_USERNAME: your *personal* Docker Hub username (used for login; org name cannot log in)
 #      - DOCKERHUB_TOKEN: Docker Hub access token (from your personal account)
-#      - DOCKERHUB_IMAGE_NAMESPACE: namespace for the image (e.g. vocence102 for org, or same as USERNAME for personal)
+#      - DOCKERHUB_IMAGE_NAMESPACE: namespace for the image (e.g. vocence78 for org, or same as USERNAME for personal)
 #
 # Validators: use the same image name in docker-compose (see docs/validator-setup.md).
 
@@ -48,7 +48,7 @@ on:
 
 env:
   REGISTRY: docker.io
-  # Where to push: DOCKERHUB_IMAGE_NAMESPACE/vocence (e.g. vocence102/vocence). Login uses DOCKERHUB_USERNAME.
+  # Where to push: DOCKERHUB_IMAGE_NAMESPACE/vocence (e.g. vocence78/vocence). Login uses DOCKERHUB_USERNAME.
   IMAGE_NAME: ${{ secrets.DOCKERHUB_IMAGE_NAMESPACE }}/vocence
 
 jobs:

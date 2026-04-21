@@ -42,7 +42,7 @@ The image name is:
 docker.io/<DOCKERHUB_USERNAME>/vocence
 ```
 
-Example: if `DOCKERHUB_IMAGE_NAMESPACE` is `vocence102`, the image is `docker.io/vocence102/vocence`.
+Example: if `DOCKERHUB_IMAGE_NAMESPACE` is `vocence78`, the image is `docker.io/vocence78/vocence`.
 
 ---
 
@@ -61,10 +61,10 @@ Example: if `DOCKERHUB_IMAGE_NAMESPACE` is `vocence102`, the image is `docker.io
    - Add:
      - `DOCKERHUB_USERNAME`: Your **personal** Docker Hub username (used only for login; an org name cannot authenticate).
      - `DOCKERHUB_TOKEN`: Docker Hub access token created from your **personal** account.
-     - `DOCKERHUB_IMAGE_NAMESPACE`: Namespace (org or username) for the image (e.g. `vocence102`). The image will be `vocence102/vocence`.
+     - `DOCKERHUB_IMAGE_NAMESPACE`: Namespace (org or username) for the image (e.g. `vocence78`). The image will be `vocence78/vocence`.
 
 4. **Validator image name**
-   - Validators must use the **same** image name you publish. Default in `docker-compose.yml` is `vocence-bt/vocence:latest`.
+   - Validators must use the **same** image name you publish. Default in `docker-compose.yml` is `vocence78/vocence:latest`.
    - If you use a different Docker Hub user/org, either:
      - Set the default in the workflow/env (e.g. a repo variable or hardcode in the workflow), or
      - Tell validators to set `DOCKER_IMAGE=<your-org>/vocence:latest` in their `.env` when running `docker-compose`.
@@ -77,7 +77,7 @@ After this, every qualifying push to `main`/`master` will build and push the ima
 
 Validators do **not** build from source in production. They:
 
-1. Use the **published image** (e.g. `vocence-bt/vocence:latest`) in `docker-compose.yml`.
+1. Use the **published image** (e.g. `vocence78/vocence:latest`) in `docker-compose.yml`.
 2. Run **Watchtower** in the same stack so it can restart the validator container when a new image is available.
 
 Details (paths, env, volumes, healthcheck) are in [validator-setup.md](validator-setup.md).
@@ -87,7 +87,7 @@ Details (paths, env, volumes, healthcheck) are in [validator-setup.md](validator
 - Watchtower runs in the same `docker-compose` stack.
 - It is configured to only manage containers that have the label `com.centurylinklabs.watchtower.enable=true` (the validator service has this label).
 - It polls the registry (e.g. every 300 seconds); when it sees a new image for that container, it pulls it and restarts the container (with `WATCHTOWER_ROLLING_RESTART=true`).
-- So when the team pushes a new image to Docker Hub, all validators that pull `vocence-bt/vocence:latest` (or the configured tag) will auto-update within the poll interval, with no manual steps.
+- So when the team pushes a new image to Docker Hub, all validators that pull `vocence78/vocence:latest` (or the configured tag) will auto-update within the poll interval, with no manual steps.
 
 ---
 
@@ -96,7 +96,7 @@ Details (paths, env, volumes, healthcheck) are in [validator-setup.md](validator
 | Step | Who | Action |
 |------|-----|--------|
 | Push to main/master (relevant paths) | Developer | Push code; workflow runs automatically (or trigger manually). |
-| Build & push | GitHub Actions | Builds image, pushes to Docker Hub (e.g. `vocence-bt/vocence:latest`). |
+| Build & push | GitHub Actions | Builds image, pushes to Docker Hub (e.g. `vocence78/vocence:latest`). |
 | Pull & restart | Watchtower (on each validator) | Polls Docker Hub, pulls new image, restarts validator container. |
 
 All validators running the same repo’s image and Watchtower stay in sync with the latest release without handwork.
