@@ -58,7 +58,7 @@ ELEMENT_WEIGHTS: Dict[str, float] = {k: v / _RAW_TOTAL for k, v in _RAW_WEIGHTS.
 
 # Minimum weighted score for an evaluation to count as a "pass" (generated_wins=True).
 # Continuous score still drives ranking; this threshold only gates the binary counter.
-PASS_THRESHOLD: float = 0.85
+PASS_THRESHOLD: float = 0.9
 
 _FALLBACK_TRAITS: Dict[str, str] = {
     "transcription": "",

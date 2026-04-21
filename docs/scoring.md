@@ -125,7 +125,7 @@ Final per-evaluation score is a continuous value in `[0, 1]`. This is the primar
 Each evaluation is tagged with a binary `generated_wins`:
 
 - `generated_wins = true` when `score >= PASS_THRESHOLD`
-- default: `PASS_THRESHOLD = 0.85`
+- default: `PASS_THRESHOLD = 0.9`
 
 **`generated_wins` is the ranking primitive.** Per-validator and global aggregates both use the binary win/lose signal derived from this threshold. The continuous `score` and `breakdown` are stored for diagnostics and dashboards but do not drive winner selection.
 
