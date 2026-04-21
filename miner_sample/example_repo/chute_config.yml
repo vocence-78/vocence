@@ -1,0 +1,21 @@
+# Vocence chute config (example / mock). Must be in your HF repo as chute_config.yml.
+# Image, NodeSelector, and Chute settings. Adapt to your model's dependencies.
+
+Image:
+  from_base: parachutes/base-python:3.12.9
+  run_command:
+    - pip install torch torchaudio transformers accelerate huggingface_hub pyyaml soundfile
+  set_workdir: /app
+
+NodeSelector:
+  gpu_count: 1
+  min_vram_gb_per_gpu: 16
+  exclude: []
+
+Chute:
+  tagline: vocence prompttts miner (example)
+  readme: vocence chute example
+  shutdown_after_seconds: 10000
+  concurrency: 1
+  max_instances: 1
+  scaling_threshold: 0.5

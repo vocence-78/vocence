@@ -1,0 +1,56 @@
+[project]
+name = "vocence"
+version = "0.1.0"
+description = "Voice intelligence subnet on Bittensor (PromptTTS, STT, STS, cloning, etc.); Q1 focuses on PromptTTS evaluation"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "python-dotenv>=1.0.0",
+    "aiohttp",
+    "bittensor==9.12.2",
+    "requests",
+    "huggingface-hub",
+    "minio",
+    "openai",
+    "audiojudge>=0.1.0",
+    "click",
+    "pydantic>=2.0.0",
+    "rich",
+    "yt-dlp",
+    # Database
+    "asyncpg>=0.29.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "alembic>=1.13.0",
+    # API
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    # Miner cli
+    "chutes",
+    "soundfile",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.12.0",
+    "aiosqlite>=0.19.0",
+]
+
+[project.scripts]
+vocence = "vocence.gateway.cli.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vocence*"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+asyncio_default_fixture_loop_scope = "function"

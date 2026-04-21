@@ -1,0 +1,18 @@
+# Optional PromptTTS settings read by your miner.py. Example values.
+
+runtime:
+  adapter: "example"
+  device_preference: "cuda"
+  dtype: "float32"
+
+generation:
+  sample_rate: 24000
+  max_seconds: 20
+  guidance_scale: 1.0
+
+io:
+  output_format: "wav"
+
+limits:
+  max_text_chars: 2000
+  max_instruction_chars: 600

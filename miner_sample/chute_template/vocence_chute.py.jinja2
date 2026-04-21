@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+"""
+Vocence chute: TTS deployment for Chutes.
+Builds the chute from repo config; at runtime loads the TTS engine from the same repo.
+Endpoints: GET /health, POST /speak (returns audio/wav).
+"""
+import io
+import sys
+import wave
+from importlib.machinery import PathFinder
+from importlib.util import module_from_spec, spec_from_file_location
+from inspect import signature
+from pathlib import Path
+from site import getsitepackages, getusersitepackages
+from sysconfig import get_paths
+from typing import Any, Optional
+
+import numpy as np
+from chutes.chute import Chute, NodeSelector
+from chutes.image import Image
+from fastapi import HTTPException, status
+from fastapi.responses import Response
+from huggingface_hub import snapshot_download
+from pydantic import BaseModel, Field
+from yaml import safe_load
+
+# --- Template variables (filled at render time) ---
+# chute_name must contain "vocence" somewhere (required by owner validation).
+VOCENCE_REPO = "{{ huggingface_repository_name }}"
+VOCENCE_REVISION = "{{ huggingface_repository_revision }}"
+VOCENCE_CHUTES_USER = "{{ chute_username }}"
+VOCENCE_CHUTE_ID = "{{ chute_name }}"
+VOCENCE_ENGINE_SCRIPT = "miner.py"
+VOCENCE_ENGINE_CLASS = "Miner"
+VOCENCE_REPO_CONFIG_FILE = "chute_config.yml"
+
+# --- Limits ---
+VOCENCE_MAX_AUDIO_SECONDS = 30
+VOCENCE_MAX_TEXT_LEN = 2000
+VOCENCE_MAX_INSTRUCTION_LEN = 600
+
+
+# --- Request/response models ---
+class VocenceSpeakRequest(BaseModel):
+    instruction: str = Field(..., min_length=1, max_length=VOCENCE_MAX_INSTRUCTION_LEN)
+    text: str = Field(..., min_length=1, max_length=VOCENCE_MAX_TEXT_LEN)
+
+
+class VocenceHealthResponse(BaseModel):
+    status: str
+    hf_repo_id: str
+    hf_revision: str
+    model_loaded: bool
+    sample_rate: Optional[int] = None
+    adapter: Optional[str] = None
+
+
+# --- Helpers: allowed import roots and sandbox ---
+def vocence_allowed_import_roots() -> set[Path]:
+    roots = {Path(get_paths()["stdlib"]).resolve()}
+    roots |= {Path(p).resolve() for p in getsitepackages()}
+    roots.add(Path(getusersitepackages()).resolve())
+    return roots
+
+
+def _vocence_top_level_allowed(mod_name: str, allowed: set[Path]) -> bool:
+    """Allow submodules (e.g. torch.ops, torch.classes) when top-level package is in allowed roots."""
+    if "." not in mod_name:
+        return False
+    top_level = mod_name.split(".", 1)[0]
+    top_mod = sys.modules.get(top_level)
+    if top_mod is None:
+        return False
+    top_path = getattr(top_mod, "__file__", None)
+    if not top_path:
+        return False
+    return any(Path(top_path).resolve().is_relative_to(r) for r in allowed)
+
+
+def vocence_assert_imports_safe(*, modules_before: set[str], engine_script_path: Path) -> None:
+    engine_script_path = engine_script_path.resolve()
+    allowed = vocence_allowed_import_roots()
+    newly_loaded = set(sys.modules.keys()) - modules_before
+    disallowed = []
+    for mod_name in sorted(newly_loaded):
+        mod = sys.modules.get(mod_name)
+        if mod is None:
+            continue
+        mod_path = getattr(mod, "__file__", None)
+        if not mod_path:
+            if _vocence_top_level_allowed(mod_name, allowed):
+                continue
+            continue
+        mod_path = Path(mod_path).resolve()
+        if mod_path == engine_script_path:
+            continue
+        if any(mod_path.is_relative_to(r) for r in allowed):
+            continue
+        if _vocence_top_level_allowed(mod_name, allowed):
+            continue
+        disallowed.append(mod_name)
+    if disallowed:
+        raise ImportError(
+            f"TTS engine may only use stdlib/site-packages; disallowed: {', '.join(disallowed)}"
+        )
+
+
+def vocence_waveform_to_wav(waveform: np.ndarray, sample_rate: int) -> bytes:
+    if waveform.ndim != 1:
+        raise ValueError("waveform must be 1D mono")
+    if waveform.dtype != np.int16:
+        wf = np.asarray(waveform, dtype=np.float32)
+        wf = np.clip(wf, -1.0, 1.0)
+        wf = (wf * 32767.0).astype(np.int16)
+    else:
+        wf = waveform
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(wf.tobytes())
+    return buf.getvalue()
+
+
+def vocence_read_repo_config(config_path: Path) -> dict:
+    if not config_path.exists():
+        raise ValueError(f"Repo config not found: {config_path}")
+    with config_path.open() as f:
+        data = safe_load(f)
+    print("✅ Vocence repo config loaded")
+    return data or {}
+
+
+def vocence_apply_config(cls: type, config: dict):
+    """Build instance from config: constructor args + chained method calls for the rest."""
+    sig = signature(cls)
+    ctor_kw = {k: v for k, v in config.items() if k in sig.parameters}
+    obj = cls(**ctor_kw)
+    for name, value in config.items():
+        if name in ctor_kw or not hasattr(obj, name):
+            continue
+        attr = getattr(obj, name)
+        if not callable(attr):
+            continue
+        if isinstance(value, list):
+            for item in value:
+                (attr(*item) if isinstance(item, (tuple, list)) else attr(item))
+        else:
+            attr(value)
+    return obj
+
+
+def vocence_build_chute(
+    repo_id: str,
+    revision: str,
+    config_filename: str,
+    chutes_user: str,
+    chute_id: str,
+) -> Chute:
+    repo_path = Path(snapshot_download(repo_id, revision=revision))
+    print("✅ Vocence repo downloaded")
+
+    raw = vocence_read_repo_config(repo_path / config_filename)
+
+    image_cfg = dict(raw.get("Image", {}))
+    image_cfg.update(username=chutes_user, name=chute_id, tag="latest", readme="README.md")
+    image = vocence_apply_config(Image, image_cfg)
+    print("✅ Image built")
+
+    node_cfg = raw.get("NodeSelector", {})
+    node_selector = vocence_apply_config(NodeSelector, node_cfg)
+    print("✅ NodeSelector built")
+
+    chute_cfg = dict(raw.get("Chute", {}))
+    chute_cfg.update(
+        username=chutes_user,
+        name=chute_id,
+        image=image,
+        node_selector=node_selector,
+        allow_external_egress=False,
+        readme="README.md",
+    )
+    chute = vocence_apply_config(Chute, chute_cfg)
+    print("✅ Chute built")
+    return chute
+
+
+class VocenceSandboxImporter(PathFinder):
+    """Only allow imports from stdlib/site-packages; block repo files except the engine script."""
+
+    def __init__(self, engine_path: Path, allowed_roots: set[Path]):
+        self._engine_path = engine_path.resolve()
+        self._allowed = allowed_roots
+
+    @classmethod
+    def find_spec(cls, fullname, path=None, target=None):
+        spec = super().find_spec(fullname, path, target)
+        if spec is None or spec.origin is None:
+            return spec
+        origin = Path(spec.origin).resolve()
+        if origin == getattr(cls, "_engine_path", None):
+            return spec
+        if any(origin.is_relative_to(r) for r in getattr(cls, "_allowed", set())):
+            return spec
+        raise ImportError(
+            f"Import not allowed: {fullname} (origin: {origin}). "
+            "TTS engine code must live entirely in the engine script."
+        )
+
+
+def vocence_load_tts_engine(repo_path: Path, script_name: str, class_name: str):
+    repo_path = Path(repo_path).resolve()
+    script_path = repo_path / script_name
+    if not script_path.is_file():
+        raise FileNotFoundError(f"TTS engine script missing: {script_path}")
+
+    allowed = vocence_allowed_import_roots()
+    VocenceSandboxImporter._engine_path = script_path
+    VocenceSandboxImporter._allowed = allowed
+
+    modules_before = set(sys.modules.keys())
+    sys.meta_path.insert(0, VocenceSandboxImporter)
+    try:
+        spec = spec_from_file_location("vocence_engine", script_path)
+        mod = module_from_spec(spec)
+        sys.modules["vocence_engine"] = mod
+        spec.loader.exec_module(mod)
+        engine_cls = getattr(mod, class_name)
+        engine = engine_cls(repo_path)
+        vocence_assert_imports_safe(modules_before=modules_before, engine_script_path=script_path)
+        return engine
+    finally:
+        sys.meta_path.remove(VocenceSandboxImporter)
+
+
+# --- Chute definition (at import time) ---
+chute = vocence_build_chute(
+    repo_id=VOCENCE_REPO,
+    revision=VOCENCE_REVISION,
+    config_filename=VOCENCE_REPO_CONFIG_FILE,
+    chutes_user=VOCENCE_CHUTES_USER,
+    chute_id=VOCENCE_CHUTE_ID,
+)
+
+
+@chute.on_startup()
+async def vocence_startup(self) -> None:
+    self.status = "unknown"
+    self.sample_rate = None
+    self.adapter = None
+    try:
+        repo_path = Path(snapshot_download(VOCENCE_REPO, revision=VOCENCE_REVISION))
+        print("✅ Vocence repo downloaded (runtime)")
+
+        self.tts_engine = vocence_load_tts_engine(
+            repo_path, VOCENCE_ENGINE_SCRIPT, VOCENCE_ENGINE_CLASS
+        )
+        print(f"✅ TTS engine loaded: {self.tts_engine}")
+
+        self.tts_engine.warmup()
+        print("✅ TTS engine warmup done")
+
+        vocence_yaml = repo_path / "vocence_config.yaml"
+        if vocence_yaml.exists():
+            with vocence_yaml.open() as f:
+                cfg = safe_load(f) or {}
+            self.sample_rate = int(cfg.get("generation", {}).get("sample_rate", 24000))
+            self.adapter = str(cfg.get("runtime", {}).get("adapter", "unknown"))
+        else:
+            self.sample_rate = 24000
+            self.adapter = "unknown"
+
+        self.status = "healthy"
+    except Exception as e:
+        self.status = f"❌ Startup failed: {e}"
+        self.tts_engine = None
+        print(self.status)
+
+
+@chute.cord(public_api_path="/health", public_api_method="GET")
+async def health(self, *args, **kwargs) -> dict[str, Any]:
+    return VocenceHealthResponse(
+        status=getattr(self, "status", "unknown"),
+        hf_repo_id=VOCENCE_REPO,
+        hf_revision=VOCENCE_REVISION,
+        model_loaded=getattr(self, "tts_engine", None) is not None,
+        sample_rate=getattr(self, "sample_rate", None),
+        adapter=getattr(self, "adapter", None),
+    ).model_dump()
+
+
+@chute.cord(
+    public_api_path="/speak",
+    public_api_method="POST",
+    stream=False,
+    output_content_type="audio/wav",
+)
+async def speak(self, args: VocenceSpeakRequest):
+    engine = getattr(self, "tts_engine", None)
+    if engine is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="TTS engine not loaded",
+        )
+    waveform, sample_rate = engine.generate_wav(
+        instruction=args.instruction, text=args.text
+    )
+    waveform = np.asarray(waveform)
+    if waveform.ndim != 1 or waveform.size == 0:
+        raise HTTPException(status_code=400, detail="invalid waveform")
+    duration_sec = float(waveform.shape[0]) / float(sample_rate)
+    if duration_sec <= 0 or duration_sec > VOCENCE_MAX_AUDIO_SECONDS:
+        raise HTTPException(status_code=400, detail="invalid duration")
+    return Response(
+        content=vocence_waveform_to_wav(waveform, sample_rate),
+        media_type="audio/wav",
+    )

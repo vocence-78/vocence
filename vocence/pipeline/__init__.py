@@ -1,0 +1,2 @@
+"""Generation pipeline for Vocence."""
+

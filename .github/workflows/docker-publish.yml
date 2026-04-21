@@ -1,0 +1,133 @@
+# Vocence Subnet - CI (tests) and Docker Build and Push
+#
+# - Runs the test suite (pytest) on every trigger.
+# - Builds and pushes the Vocence validator image to Docker Hub on push to main/master
+#   only if tests pass. Validators running with Watchtower auto-update.
+# - Ignores docs/ and env.example: changes only to those do not trigger test or build.
+#
+# Setup (maintainers):
+#   1. Create a Docker Hub repository (e.g. vocence102/vocence)
+#   2. Create an access token at https://hub.docker.com/settings/security (your *personal* account)
+#   3. Add GitHub Actions secrets (Settings > Secrets and variables > Actions):
+#      - DOCKERHUB_USERNAME: your *personal* Docker Hub username (used for login; org name cannot log in)
+#      - DOCKERHUB_TOKEN: Docker Hub access token (from your personal account)
+#      - DOCKERHUB_IMAGE_NAMESPACE: namespace for the image (e.g. vocence102 for org, or same as USERNAME for personal)
+#
+# Validators: use the same image name in docker-compose (see docs/validator-setup.md).
+
+name: Vocence - CI and Docker Publish
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "vocence/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Dockerfile"
+      - ".github/workflows/docker-publish.yml"
+      - "docker-compose.yml"
+      - ".github/workflows/**"
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - "vocence/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Dockerfile"
+      - ".github/workflows/docker-publish.yml"
+      - "docker-compose.yml"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+env:
+  REGISTRY: docker.io
+  # Where to push: DOCKERHUB_IMAGE_NAMESPACE/vocence (e.g. vocence102/vocence). Login uses DOCKERHUB_USERNAME.
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_IMAGE_NAMESPACE }}/vocence
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Run tests
+        run: uv run pytest tests/ -v --tb=short
+
+  build-and-push:
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      - name: Generate build summary
+        run: |
+          echo "## Vocence Docker Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Validators running with Watchtower will auto-update within the poll interval (e.g. 5 minutes)." >> $GITHUB_STEP_SUMMARY

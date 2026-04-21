@@ -1,0 +1,84 @@
+# Vocence Subnet - Validator with Watchtower auto-updates
+#
+# Validators run this stack. When the team pushes a new image to Docker Hub,
+# Watchtower pulls it and restarts the validator container so all validators
+# stay up to date without manual steps.
+#
+# Usage:
+#   1. Copy env.example to .env and fill in wallet, Chutes, Hippius, API_URL (from Vocence team).
+#   2. Ensure ~/.bittensor/wallets exists with your coldkey/hotkey.
+#   3. Run: docker compose up -d
+#   4. Logs: docker compose logs -f validator (or read daily files in ./logs/)
+#
+# Logs: daily files are written to ./logs/vocence_YYYY-MM-DD.log on the host.
+# Image: use the same image name your team publishes (set DOCKER_IMAGE if different).
+
+services:
+  validator:
+    image: ${DOCKER_IMAGE:-vocence102/vocence:latest}
+    build: .
+
+    container_name: vocence-validator
+    restart: unless-stopped
+
+    env_file:
+      - .env
+    # All variables from .env are loaded into the container. The entries below
+    # only set defaults for these six so the stack works with a minimal .env.
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NETWORK=${NETWORK:-finney}
+      - NETUID=${NETUID:-78}
+      - WALLET_NAME=${WALLET_NAME:-default}
+      - HOTKEY_NAME=${HOTKEY_NAME:-default}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_DIR=${LOG_DIR:-logs}
+
+    volumes:
+      - ~/.bittensor/wallets:/home/validator/.bittensor/wallets:ro
+      - ./logs:/app/logs
+
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import bittensor; print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: vocence-watchtower
+    restart: unless-stopped
+
+    environment:
+      - DOCKER_API_VERSION=1.40
+      - WATCHTOWER_POLL_INTERVAL=300
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_ROLLING_RESTART=true
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
