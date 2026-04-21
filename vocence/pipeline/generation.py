@@ -622,6 +622,23 @@ async def generate_samples_continuously(
                 emit_log(f"Participant {hotkey_short}: {result_str} score={comparison['score']:.3f}",
                     "success" if comparison["generated_wins"] else "info")
                 emit_log(f"Eval: {result_str} | score={comparison['score']:.3f} | {reasoning_short}", "info")
+
+                breakdown = comparison.get("breakdown") or {}
+                script_info = breakdown.get("script")
+                if script_info is not None:
+                    script_wer = max(0.0, 1.0 - float(script_info.get("score", 0.0)))
+                    emit_log(f"  [{hotkey_short}] script: WER={script_wer:.3f} (score={script_info.get('score', 0.0):.2f})", "info")
+                trait_parts = []
+                for key in ("gender", "pitch", "speed", "age_group", "emotion", "tone", "accent"):
+                    info = breakdown.get(key)
+                    if info is None:
+                        continue
+                    trait_parts.append(f"{key}: {info.get('expected')}→{info.get('actual')} ({info.get('score', 0.0):.2f})")
+                if trait_parts:
+                    emit_log(f"  [{hotkey_short}] traits: {' | '.join(trait_parts)}", "info")
+                nat_info = breakdown.get("naturalness")
+                if nat_info is not None:
+                    emit_log(f"  [{hotkey_short}] naturalness: {nat_info.get('actual')} ({nat_info.get('score', 0.0):.2f})", "info")
             
             # 7. Build metadata (source traits are the task spec miners were scored against)
             from vocence.pipeline.evaluation import ELEMENT_WEIGHTS

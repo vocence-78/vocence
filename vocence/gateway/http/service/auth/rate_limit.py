@@ -2,12 +2,12 @@
 Per-hotkey sliding-window rate limiter for the owner API.
 
 Protects write endpoints from a single authenticated validator (or an attacker
-pretending to be one) flooding the DB. Default policy: 2 requests per 10 minutes
-per hotkey across write endpoints.
+pretending to be one) flooding the DB. Default policy: 100 requests per 30
+minutes per hotkey across write endpoints.
 
-Tuned for normal validator cadence — one cycle is ~30 min, during which a
-validator does 1 live-start + 1 batch submit + at most 1 cancel. 2/10min is
-well above that.
+A normal validator does ~5 writes per 30-min cycle (live-start, batch submit,
+graph-weights start/end, optional cancel), plus retries. 100/30min gives ample
+headroom while still blocking spam from a leaked key.
 
 In-memory sliding window is fine for a single-process uvicorn worker. If we
 scale out workers, replace with Redis later.
@@ -23,8 +23,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 
-RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("RATE_LIMIT_MAX_REQUESTS", "2"))
-RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "600"))
+RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("RATE_LIMIT_MAX_REQUESTS", "100"))
+RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "1800"))
 
 # Path prefixes that count against the limit. GETs are not rate-limited here;
 # they're idempotent reads against cached snapshots. Admin routes are included
