@@ -170,7 +170,7 @@ ADMIN_HOTKEYS = [x.strip() for x in os.environ.get("ADMIN_HOTKEYS", "").split(",
 # The owner never commits on chain; we inject them as a synthetic participant with uid=OWNER_UID (0), treated as
 # committed at BASE_MODEL_COMMIT_BLOCK so miners must beat them by THRESHOLD_MARGIN to win. Replace mock values.
 OWNER_UID = 0
-OWNER_HOTKEY = "5GgmbDEHCg9VDxmqxpo4mdtqKiBDzd9kgSPB8UM31CNZmQcA"  # Replace with owner's hotkey
+OWNER_HOTKEY = "5Fk765B4CRBekwErwE5VxvveWhHztHSfsnsLt8cbDayDWsuk"  # Replace with owner's hotkey
 BASE_MODEL_CHUTE_ID = "5e990736-9690-5b52-abe1-6b1e99751d1e"  # Chute ID for owner's base model (replace with real)
 BASE_MODEL_MODEL_NAME = "concil859856/qwen3-voicedesign-base"  # HuggingFace model name for owner base model (replace with real)
 BASE_MODEL_MODEL_REVISION = "9f2d4c9f23e66f6700b7ca1420d5a8acb7662e7f"  # Model revision for owner base model (replace with real)
