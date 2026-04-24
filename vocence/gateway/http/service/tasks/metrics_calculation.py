@@ -5,7 +5,7 @@ Periodically reads every active validator's S3 bucket, aggregates per-miner
 win rates with stake-weighted scoring, applies the winner-selection rule, and
 persists a dashboard-ready snapshot to global_scoring_snapshots.
 
-Runs every METRICS_CALCULATION_INTERVAL seconds (default 600s).
+Runs every METRICS_CALCULATION_INTERVAL seconds (default 1800s).
 """
 
 import asyncio

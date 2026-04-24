@@ -14,7 +14,14 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import aiohttp
 from huggingface_hub import HfApi
 
-from vocence.domain.config import HF_AUTH_TOKEN, MODEL_FINGERPRINT_CACHE_TTL, BASE_MODEL_CHUTE_ID
+from vocence.domain.config import (
+    HF_AUTH_TOKEN,
+    MODEL_FINGERPRINT_CACHE_TTL,
+    BASE_MODEL_CHUTE_ID,
+    BASE_MODEL_MODEL_NAME,
+    BASE_MODEL_MODEL_REVISION,
+    BASE_MODEL_WEIGHTS_HASH,
+)
 from vocence.shared.logging import emit_log
 from vocence.domain.entities import ParticipantInfo
 from vocence.adapters.chutes import fetch_chute_details, fetch_chute_code
@@ -215,13 +222,13 @@ async def validate_miner(
         block=block,
     )
 
-    # Owner base-model chute: skip chute/wrapper checks but set model_hash so duplicate detection can catch miners copying the base model.
+    # Owner base-model chute: skip chute/wrapper checks. The HF repo has no weight files so
+    # get_model_fingerprint would fall back to a revision-based hash; pin BASE_MODEL_WEIGHTS_HASH
+    # instead so detect_duplicates catches miners copying the base model.
     if chute_id == BASE_MODEL_CHUTE_ID:
         info.is_valid = True
-        model_info = await get_model_fingerprint(model_name, model_revision)
-        if model_info:
-            info.model_hash = model_info[0]
-        emit_log(f"uid {uid} ({hotkey[:12]}...): base-model chute (BASE_MODEL_CHUTE_ID), always valid", "success")
+        info.model_hash = BASE_MODEL_WEIGHTS_HASH
+        emit_log(f"uid {uid} ({hotkey[:12]}...): base-model chute (BASE_MODEL_CHUTE_ID), always valid, pinned hash", "success")
         return info
 
     # Step 1: Fetch chute info (need slug to check magic word)
@@ -280,7 +287,12 @@ async def validate_miner(
         return info
 
     model_hash, hf_revision = model_info
-    info.model_hash = model_hash
+    # If a miner commits the owner base-model HF repo (same name + revision) from their own chute,
+    # pin the canonical weights hash so detect_duplicates groups them with the owner.
+    if model_name == BASE_MODEL_MODEL_NAME and model_revision == BASE_MODEL_MODEL_REVISION:
+        info.model_hash = BASE_MODEL_WEIGHTS_HASH
+    else:
+        info.model_hash = model_hash
 
     # Step 5: Verify revision matches HuggingFace
     if model_revision != hf_revision:
