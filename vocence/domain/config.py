@@ -159,8 +159,8 @@ SERVICE_RELOAD = (os.environ.get("SERVICE_RELOAD", "").lower() == "true")
 LOG_DIR = os.environ.get("LOG_DIR", "logs")
 
 # Background worker intervals (seconds)
-PARTICIPANT_VALIDATION_INTERVAL = int(os.environ.get("PARTICIPANT_VALIDATION_INTERVAL", "600"))
-METRICS_CALCULATION_INTERVAL = int(os.environ.get("METRICS_CALCULATION_INTERVAL", "600"))
+PARTICIPANT_VALIDATION_INTERVAL = int(os.environ.get("PARTICIPANT_VALIDATION_INTERVAL", "1800"))
+METRICS_CALCULATION_INTERVAL = int(os.environ.get("METRICS_CALCULATION_INTERVAL", "1800"))
 
 # Auth (owner API)
 SIGNATURE_EXPIRY_SECONDS = int(os.environ.get("SIGNATURE_EXPIRY_SECONDS", "300"))
@@ -174,6 +174,10 @@ OWNER_HOTKEY = "5Fk765B4CRBekwErwE5VxvveWhHztHSfsnsLt8cbDayDWsuk"  # Replace wit
 BASE_MODEL_CHUTE_ID = "5e990736-9690-5b52-abe1-6b1e99751d1e"  # Chute ID for owner's base model (replace with real)
 BASE_MODEL_MODEL_NAME = "concil859856/qwen3-voicedesign-base"  # HuggingFace model name for owner base model (replace with real)
 BASE_MODEL_MODEL_REVISION = "9f2d4c9f23e66f6700b7ca1420d5a8acb7662e7f"  # Model revision for owner base model (replace with real)
+# Canonical weights hash for the owner base model. The HF repo ships without weight files, so
+# get_model_fingerprint has nothing to hash; we pin this value so detect_duplicates still catches
+# miners who copy the base model.
+BASE_MODEL_WEIGHTS_HASH = "bdd08e0d48fef836a5a941eb2ab666ebc85be056566376fc672c584c0346b125"
 BASE_MODEL_COMMIT_BLOCK = 1000  # Block at which owner is treated as committed (never on chain)
 # UID 0 is the burn key on Bittensor; when no miner is eligible, validators set weight 1 on UID 0 to burn incentives.
 BURN_UID = 0
