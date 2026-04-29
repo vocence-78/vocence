@@ -305,9 +305,9 @@ candidate passes prior miner P if:
 
 Default:
 
-- `THRESHOLD_MARGIN = 0.05`
+- `THRESHOLD_MARGIN = 0.03`
 
-So a candidate must exceed each earlier eligible miner by at least 5 percentage points of win rate.
+So a candidate must exceed each earlier eligible miner by at least 3 percentage points of win rate.
 
 ---
 

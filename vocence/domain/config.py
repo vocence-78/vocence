@@ -44,7 +44,7 @@ SAMPLE_SLOT_INTERVAL_BLOCKS = int(os.environ.get("SAMPLE_SLOT_INTERVAL_BLOCKS", 
 # Derived: block % INTERVAL == this value → run sample round
 SAMPLE_SLOT_OFFSET_BLOCKS = (VALIDATOR_ID % 6) * 25  # 0, 25, 50, 75, 100, 125
 MIN_EVALS_TO_COMPETE = int(os.environ.get("MIN_EVALS_TO_COMPETE", "40"))  # Miner must have more than this many evals in at least 3 validator buckets to be globally eligible
-THRESHOLD_MARGIN = float(os.environ.get("THRESHOLD_MARGIN", "0.05"))
+THRESHOLD_MARGIN = float(os.environ.get("THRESHOLD_MARGIN", "0.03"))
 # Most recent N evaluations used for scoring (validator S3 + owner metrics). Default 50.
 MAX_EVALS_FOR_SCORING = int(os.environ.get("MAX_EVALS_FOR_SCORING", "50"))
 
