@@ -25,6 +25,8 @@ from vocence.domain.config import (
     BASE_MODEL_MODEL_NAME,
     BASE_MODEL_MODEL_REVISION,
     BASE_MODEL_COMMIT_BLOCK,
+    COMMIT_LOCK_BLOCK,
+    MAX_POST_CUTOVER_COMMITS,
 )
 from vocence.registry.persistence.repositories.miner_repository import MinerRepository
 from vocence.registry.persistence.repositories.blocklist_repository import BlocklistRepository
@@ -111,10 +113,33 @@ class ParticipantValidationTask:
                         })
                         continue
                     
-                    # Parse commitment
-                    commit_block, commit_value = commit_data[-1]
+                    # Enforce per-hotkey commit cap at/after COMMIT_LOCK_BLOCK (only field-valid commits consume a slot)
+                    if COMMIT_LOCK_BLOCK > 0:
+                        post_cutover = []
+                        for b, v in commit_data:
+                            if b < COMMIT_LOCK_BLOCK:
+                                continue
+                            if not validate_commitment_fields(parse_commitment(v))[0]:
+                                continue
+                            post_cutover.append((b, v))
+                        if len(post_cutover) > MAX_POST_CUTOVER_COMMITS:
+                            latest_block = post_cutover[-1][0]
+                            validated_participants.append({
+                                "uid": uid,
+                                "miner_hotkey": hotkey,
+                                "block": latest_block,
+                                "is_valid": False,
+                                "invalid_reason": (
+                                    f"too_many_commits:{len(post_cutover)}_post_cutover_"
+                                    f"max_{MAX_POST_CUTOVER_COMMITS}_after_block_{COMMIT_LOCK_BLOCK}"
+                                ),
+                            })
+                            continue
+                        commit_block, commit_value = post_cutover[-1] if post_cutover else commit_data[-1]
+                    else:
+                        commit_block, commit_value = commit_data[-1]
                     parsed = parse_commitment(commit_value)
-                    
+
                     # Validate commit fields
                     is_valid, reason = validate_commitment_fields(parsed)
                     if not is_valid:
