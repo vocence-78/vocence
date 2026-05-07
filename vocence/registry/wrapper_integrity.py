@@ -21,6 +21,45 @@ APPROVED_VAR_PATTERNS = [
     (re.compile(r'VOCENCE_CHUTE_ID\s*=\s*["\'].*?["\']', re.DOTALL), 'VOCENCE_CHUTE_ID = ""'),
 ]
 
+APPROVED_VAR_NAMES = (
+    "VOCENCE_REPO",
+    "VOCENCE_REVISION",
+    "VOCENCE_CHUTES_USER",
+    "VOCENCE_CHUTE_ID",
+)
+
+
+def extract_approved_variables(source: str) -> dict[str, str]:
+    """Extract the four approved variable values from a deploy script.
+
+    Walks the module-level AST so that lookalike text inside comments, docstrings,
+    or other expressions cannot fool the extractor (a regex match would happily
+    read a sha out of `# VOCENCE_REVISION = "..."` and miss the real binding).
+
+    Only `Name = Constant(str)` assignments at module top level are recognized,
+    which is exactly the shape the canonical wrapper uses — anything else would
+    fail wrapper integrity anyway.
+
+    Returns a dict mapping each var name to its declared string value. Missing
+    variables map to "" so callers can compare directly without KeyError.
+    """
+    out: dict[str, str] = {name: "" for name in APPROVED_VAR_NAMES}
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return out
+    targets = set(APPROVED_VAR_NAMES)
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or target.id not in targets:
+            continue
+        if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
+            continue
+        out[target.id] = node.value.value
+    return out
+
 
 def _load_canonical_source() -> str:
     """Load canonical wrapper source (template with empty placeholder values)."""
