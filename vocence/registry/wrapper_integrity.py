@@ -28,6 +28,14 @@ APPROVED_VAR_NAMES = (
     "VOCENCE_CHUTE_ID",
 )
 
+# A valid HuggingFace commit revision is a 40-char lowercase hex git sha.
+_HF_SHA_PATTERN = re.compile(r'^[0-9a-f]{40}$')
+
+
+def is_valid_hf_revision(revision: str) -> bool:
+    """Return True iff revision is a 40-char lowercase hex git sha (no branches/tags)."""
+    return bool(_HF_SHA_PATTERN.match(revision or ""))
+
 
 def extract_approved_variables(source: str) -> dict[str, str]:
     """Extract the four approved variable values from a deploy script.
