@@ -25,7 +25,11 @@ from vocence.domain.config import (
 from vocence.shared.logging import emit_log
 from vocence.domain.entities import ParticipantInfo
 from vocence.adapters.chutes import fetch_chute_details, fetch_chute_code
-from vocence.registry.wrapper_integrity import check_wrapper_integrity
+from vocence.registry.wrapper_integrity import (
+    check_wrapper_integrity,
+    extract_approved_variables,
+    is_valid_hf_revision,
+)
 
 # Chute name must contain this substring (case-insensitive) for owner validation to pass.
 # Checked against the chute name from Chutes API (e.g. vocence-parler-tts-010), not chute_id (UUID).
@@ -272,11 +276,41 @@ async def validate_miner(
         emit_log(f"uid {uid} ({hotkey[:12]}...): failed at chute_hot (not running)", "warn")
         return info
 
-    # Step 3: Verify revision matches chute
-    chute_revision = chute.get("revision", "")
-    if chute_revision and model_revision != chute_revision:
-        info.invalid_reason = f"revision_mismatch:chute={chute_revision}"
-        emit_log(f"uid {uid} ({hotkey[:12]}...): failed at revision_chute_match", "warn")
+    # Step 3: Cross-check on-chain commitments against the deploy script source.
+    # The chute pulls miner.py at runtime using VOCENCE_REPO/VOCENCE_REVISION declared in
+    # the deploy script, so those values — not the Chutes metadata — are what actually run.
+    # (The Chutes /chutes/{id} response does not reliably expose `revision`, so the previous
+    # `chute.get("revision")` check was a no-op and let miners deploy with VOCENCE_REVISION="main"
+    # while committing a clean sha on chain.)
+    deployed_vars = extract_approved_variables(deployed_code)
+    wrapper_repo = deployed_vars["VOCENCE_REPO"]
+    wrapper_revision = deployed_vars["VOCENCE_REVISION"]
+
+    if not is_valid_hf_revision(wrapper_revision):
+        info.invalid_reason = f"wrapper_revision_not_sha:{wrapper_revision or 'missing'}"
+        emit_log(
+            f"uid {uid} ({hotkey[:12]}...): failed at wrapper_revision_format "
+            f"(VOCENCE_REVISION must be a 40-char hex sha, got {wrapper_revision!r})",
+            "warn",
+        )
+        return info
+
+    if wrapper_revision != model_revision:
+        info.invalid_reason = f"revision_mismatch:wrapper={wrapper_revision}"
+        emit_log(
+            f"uid {uid} ({hotkey[:12]}...): failed at wrapper_revision_match "
+            f"(chain={model_revision} wrapper={wrapper_revision})",
+            "warn",
+        )
+        return info
+
+    if wrapper_repo != model_name:
+        info.invalid_reason = f"repo_mismatch:wrapper={wrapper_repo}"
+        emit_log(
+            f"uid {uid} ({hotkey[:12]}...): failed at wrapper_repo_match "
+            f"(chain={model_name} wrapper={wrapper_repo})",
+            "warn",
+        )
         return info
 
     # Step 4: Fetch model info from HuggingFace
@@ -302,7 +336,8 @@ async def validate_miner(
 
     info.is_valid = True
     emit_log(
-        f"uid {uid} ({hotkey[:12]}...): passed chute_fetch, wrapper_integrity, chute_hot, revision_chute_match, model_fingerprint, revision_hf_match",
+        f"uid {uid} ({hotkey[:12]}...): passed chute_fetch, wrapper_integrity, chute_hot, "
+        f"wrapper_revision_match, wrapper_repo_match, model_fingerprint, revision_hf_match",
         "success",
     )
     return info
