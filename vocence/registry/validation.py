@@ -336,7 +336,8 @@ async def validate_miner(
 
     info.is_valid = True
     emit_log(
-        f"uid {uid} ({hotkey[:12]}...): passed chute_fetch, wrapper_integrity, chute_hot, revision_chute_match, model_fingerprint, revision_hf_match",
+        f"uid {uid} ({hotkey[:12]}...): passed chute_fetch, wrapper_integrity, chute_hot, "
+        f"wrapper_revision_match, wrapper_repo_match, model_fingerprint, revision_hf_match",
         "success",
     )
     return info
