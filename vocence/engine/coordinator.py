@@ -62,8 +62,40 @@ from vocence.pipeline.generation import generate_samples_continuously
 from vocence.validator_buckets import ValidatorBucketConfig, load_validator_bucket_configs
 
 
+# Temporary subnet burn flag. When True, the validator skips all miner queries,
+# sample generation, owner-API lookups, and cross-validator scoring, and simply
+# sets weight 1.0 on BURN_UID every cycle. Flip to False to restore normal flow.
+BURN_MODE = True
+
 # Track last cycle we executed so we only run once per cycle when block is in tolerance window
 _last_executed_cycle_block: int | None = None
+
+
+async def _burn_cycle(
+    subtensor_ref: dict,
+    wallet: bt.Wallet,
+    block: int,
+) -> None:
+    """Short-circuit weight-setting: assign all weight to BURN_UID and return."""
+    subtensor = subtensor_ref["client"]
+    emit_log(f"[{block}] BURN_MODE active — setting weight 1 on UID {BURN_UID}", "info")
+    try:
+        await asyncio.wait_for(
+            subtensor.set_weights(
+                wallet=wallet,
+                netuid=SUBNET_ID,
+                uids=[BURN_UID],
+                weights=[1.0],
+                wait_for_inclusion=True,
+            ),
+            timeout=SUBTENSOR_TIMEOUT_SEC,
+        )
+        emit_log(f"[{block}] Set weight 1 on UID {BURN_UID} (burn)", "success")
+    except asyncio.TimeoutError:
+        emit_log(f"[{block}] Timed out setting weights (>{SUBTENSOR_TIMEOUT_SEC}s), reconnecting subtensor...", "error")
+        await _reconnect_subtensor(subtensor_ref)
+    except Exception as e:
+        emit_log(f"[{block}] Failed to set weights (burn): {e}", "error")
 
 
 async def fetch_participants_from_api() -> List[ParticipantInfo]:
@@ -278,6 +310,11 @@ async def execute_cycle(
     """
     subtensor = subtensor_ref["client"]
     _ = storage_client  # generation still uses the local validator bucket; scoring now reads all active validator buckets
+
+    if BURN_MODE:
+        await _burn_cycle(subtensor_ref, wallet, block)
+        return
+
     emit_log(f"[{block}] Fetching participants and active validators from API", "info")
     await _send_weight_setting_graph_event(block, phase="fetching_inputs")
 
@@ -562,32 +599,35 @@ async def main() -> None:
     emit_log(f"Max evals for scoring (recent window): {MAX_EVALS_FOR_SCORING}", "info")
     emit_log(f"Cycle/slot block tolerance: ±{CYCLE_BLOCK_TOLERANCE}, subtensor timeout: {SUBTENSOR_TIMEOUT_SEC}s", "info")
     
-    emit_log("Starting sample generation loop in background...", "start")
+    if BURN_MODE:
+        emit_log("BURN_MODE active — skipping sample generation loop", "warn")
+    else:
+        emit_log("Starting sample generation loop in background...", "start")
 
-    async def get_block_with_timeout() -> int:
-        """Wrap get_current_block with timeout; on timeout reconnect so generator gets fresh connection."""
-        try:
-            return await asyncio.wait_for(subtensor_ref["client"].get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC)
-        except (asyncio.TimeoutError, Exception):
-            emit_log("get_current_block failed in generator, reconnecting subtensor...", "warn")
-            await _reconnect_subtensor(subtensor_ref)
-            raise
+        async def get_block_with_timeout() -> int:
+            """Wrap get_current_block with timeout; on timeout reconnect so generator gets fresh connection."""
+            try:
+                return await asyncio.wait_for(subtensor_ref["client"].get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC)
+            except (asyncio.TimeoutError, Exception):
+                emit_log("get_current_block failed in generator, reconnecting subtensor...", "warn")
+                await _reconnect_subtensor(subtensor_ref)
+                raise
 
-    generator_task = asyncio.create_task(
-        generate_samples_continuously(corpus_client, validator_client, openai_client, get_block_with_timeout)
-    )
-    
-    def handle_generator_exception(task: asyncio.Task) -> None:
-        """Handle exceptions from the background generator task."""
-        try:
-            exc = task.exception()
-            if exc is not None:
-                emit_log(f"Background generator task failed: {exc}", "error")
-        except asyncio.CancelledError:
-            emit_log("Background generator task was cancelled", "warn")
-    
-    generator_task.add_done_callback(handle_generator_exception)
-    
+        generator_task = asyncio.create_task(
+            generate_samples_continuously(corpus_client, validator_client, openai_client, get_block_with_timeout)
+        )
+
+        def handle_generator_exception(task: asyncio.Task) -> None:
+            """Handle exceptions from the background generator task."""
+            try:
+                exc = task.exception()
+                if exc is not None:
+                    emit_log(f"Background generator task failed: {exc}", "error")
+            except asyncio.CancelledError:
+                emit_log("Background generator task was cancelled", "warn")
+
+        generator_task.add_done_callback(handle_generator_exception)
+
     emit_log("Starting weight setting loop...", "start")
     while True:
         await cycle_step(subtensor_ref, wallet, validator_client)
