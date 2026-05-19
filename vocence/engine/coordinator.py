@@ -565,26 +565,35 @@ async def cycle_step(subtensor_ref: dict, wallet: bt.Wallet, storage_client: Min
 async def main() -> None:
     """Main entry point for the validator."""
     print_header("Vocence Validator Starting")
-    
-    # Check required environment variables
-    if not CHUTES_AUTH_KEY:
-        emit_log("CHUTES_AUTH_KEY environment variable required", "error")
-        return
-    if not OPENAI_AUTH_KEY:
-        emit_log("OPENAI_AUTH_KEY environment variable required", "error")
-        return
-    
+
+    if BURN_MODE:
+        emit_log("BURN_MODE active — skipping CHUTES/OPENAI/Hippius secret checks and client init", "warn")
+
+    # Check required environment variables (only needed when generation/scoring runs)
+    if not BURN_MODE:
+        if not CHUTES_AUTH_KEY:
+            emit_log("CHUTES_AUTH_KEY environment variable required", "error")
+            return
+        if not OPENAI_AUTH_KEY:
+            emit_log("OPENAI_AUTH_KEY environment variable required", "error")
+            return
+
     emit_log(f"Using centralized API for miners: {API_URL}", "info")
     emit_log(f"Using corpus bucket (read) and own samples bucket for scoring: {AUDIO_SAMPLES_BUCKET}", "info")
-    
-    # Initialize clients (validator: two Hippius credential sets)
-    # Use a ref so we can replace the subtensor on timeout (reconnect)
+
+    # Initialize clients. In burn mode we only need subtensor + wallet to set weights.
+    # Use a ref so we can replace the subtensor on timeout (reconnect).
     emit_log("Initializing clients...", "info")
     subtensor_ref: dict = {"client": bt.AsyncSubtensor(network=CHAIN_NETWORK)}
     wallet = bt.Wallet(name=COLDKEY_NAME, hotkey=HOTKEY_NAME)
-    corpus_client = create_corpus_storage_client()
-    validator_client = create_validator_storage_client()
-    openai_client = AsyncOpenAI(api_key=OPENAI_AUTH_KEY)
+    if BURN_MODE:
+        corpus_client = None
+        validator_client = None
+        openai_client = None
+    else:
+        corpus_client = create_corpus_storage_client()
+        validator_client = create_validator_storage_client()
+        openai_client = AsyncOpenAI(api_key=OPENAI_AUTH_KEY)
     
     # Log configuration
     emit_log(f"Wallet: {COLDKEY_NAME}/{HOTKEY_NAME}", "info")
