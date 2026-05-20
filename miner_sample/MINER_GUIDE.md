@@ -20,9 +20,10 @@ Your HF repo must include:
 |------|----------|-------------|
 | `miner.py` | Yes | PromptTTS engine: class `Miner`, `__init__(path_hf_repo: Path)`, `warmup()`, `generate_wav(instruction, text)` → `(waveform, sample_rate)`. |
 | `chute_config.yml` | Yes | Image (base, pip), NodeSelector (GPU), Chute (tagline, scaling). Used at build time. |
-| `vocence_config.yaml` | No | PromptTTS options (sample_rate, limits). Read by your engine if present. |
+| `vocence_config.yaml` | Yes | **Must declare `model_id` matching your committed `VOCENCE_REPO`** (see section 4). May also carry runtime/generation options read by your engine. |
+| Model weight files | Yes | The repo must contain at least **20 MiB** of LFS weight data — empty / placeholder repos are rejected. |
 
-All engine logic must live in `miner.py`; only stdlib and site-packages may be imported (no other repo files).
+All engine logic must live in `miner.py`; only stdlib and site-packages may be imported (no other repo files). See **section 4** for the exact rules on what `miner.py` is allowed to do.
 
 ---
 
@@ -32,9 +33,98 @@ All engine logic must live in `miner.py`; only stdlib and site-packages may be i
 - **warmup()** — Optional; one short `generate_wav` so the first request does not time out.
 - **generate_wav(instruction: str, text: str) -> tuple[np.ndarray, int]** — Return mono float32 PCM and sample rate.
 
+The wrapper has already downloaded your repo and the HF cache is populated before your `__init__` runs, so `from_pretrained(model_id)` resolves from disk without hitting the network.
+
 ---
 
-## 4. Approved template variables (only these)
+## 4. `miner.py` rules
+
+These rules are enforced **twice**: owner-side at registration (early rejection) and at chute startup by the canonical wrapper (hash-locked, can't be bypassed). They constrain **how** you load your model, not **what** your model is — every miner ships their own unique `miner.py`, with their own architecture, sampling, post-processing, and any other engine code they want.
+
+### 4a. `vocence_config.yaml` must declare `model_id`
+
+The file must contain a top-level `model_id` field whose value equals `VOCENCE_REPO` (the HF repo ID you commit on chain):
+
+```yaml
+model_id: "your-hf-user/your-repo-name"
+# ... your other runtime/generation settings below
+```
+
+If `model_id` is missing, malformed, or doesn't match `VOCENCE_REPO`, the chute refuses to start and the owner marks the miner invalid (`model_id_mismatch:yaml=...`).
+
+### 4b. `from_pretrained` must use the `model_id` variable
+
+Every call to `from_pretrained` in `miner.py` must take the bare `model_id` variable as its first positional argument (or as the `pretrained_model_name_or_path` keyword). No string literals, no other variables, no expressions like `model_id + "-large"`.
+
+✅ Allowed:
+```python
+import yaml
+from transformers import AutoModel, AutoProcessor, AutoTokenizer
+
+class Miner:
+    def __init__(self, repo_path):
+        cfg = yaml.safe_load((repo_path / "vocence_config.yaml").open())
+        model_id = cfg["model_id"]
+        self.tok       = AutoTokenizer.from_pretrained(model_id)
+        self.processor = AutoProcessor.from_pretrained(model_id)
+        self.model     = AutoModel.from_pretrained(model_id)
+        # Subfolders within your own repo are fine:
+        self.vocoder   = AutoModel.from_pretrained(model_id, subfolder="vocoder")
+```
+
+❌ Rejected:
+```python
+self.m = AutoModel.from_pretrained("other-user/their-model")   # hardcoded string
+self.m = AutoModel.from_pretrained(model_id + "-large")        # expression
+self.m = AutoModel.from_pretrained(some_other_var)             # wrong variable
+```
+
+You may load any model files from your own repo path directly — `torch.load(repo_path / "voice_latents.pt")`, `open(repo_path / "config.json")`, etc. are all unaffected.
+
+### 4c. Banned function calls
+
+These calls are banned anywhere in `miner.py`:
+
+| Call | Why |
+|------|-----|
+| `snapshot_download(...)` | Pulls weights from arbitrary HF repos. |
+| `hf_hub_download(...)` | Same. |
+| `cached_download(...)` | Same. |
+| `pipeline(...)` | Loads model from arbitrary `model=` arg, bypassing the `from_pretrained` check. |
+| `torch.hub.load(...)` | Loads model from arbitrary GitHub/HF source. |
+| `eval(...)`, `exec(...)`, `compile(...)` | Defeat static analysis. |
+| `__import__("...")`, `importlib.import_module(...)` | Dynamic imports defeat static analysis. |
+
+### 4d. Banned imports
+
+These top-level modules (and any submodule of them) cannot be imported by `miner.py`:
+
+| Module prefix | Why |
+|---------------|-----|
+| `requests`, `urllib`, `urllib2`, `urllib3`, `httpx`, `aiohttp` | Network egress. |
+| `socket` | Raw network. |
+| `huggingface_hub` | Direct HF API; bypasses `from_pretrained` rule. |
+| `importlib` | Dynamic-import escape. |
+| `torch.hub` | Arbitrary remote model loading. |
+
+Other imports (`torch`, `transformers`, `numpy`, `yaml`, `tokenizers`, any other library you `pip install` in `chute_config.yml`) are fine.
+
+### 4e. What stays completely up to you
+
+The rules above are the entire surface. Within them, you choose:
+
+- Model architecture (Parler-TTS, XTTS, Tortoise, your own transformer, anything).
+- Training data, fine-tuning, weight precision.
+- Inference logic: sampling strategy, beam search, classifier-free guidance, your own scheduler.
+- Pre- and post-processing: text normalization, prosody tagging, waveform filtering, loudness normalization.
+- Multiple sub-models loaded via `from_pretrained(model_id, subfolder=...)` for things like vocoder + acoustic model + tokenizer.
+- Additional files in your repo: `torch.load(...)` voice embeddings, JSON configs, lookup tables, etc.
+
+Two miners with two completely different `miner.py` files both pass as long as they follow 4a–4d.
+
+---
+
+## 5. Approved template variables (only these)
 
 The canonical wrapper is generated from the template in `chute_template/`. You may change **only**:
 
@@ -47,9 +137,11 @@ The canonical wrapper is generated from the template in `chute_template/`. You m
 
 All other wrapper code is fixed. Changing anything else causes **wrapper integrity** to fail (see below).
 
+`VOCENCE_REPO` must equal the `model_id` field in your `vocence_config.yaml` (see section 4a).
+
 ---
 
-## 5. Render, build, deploy
+## 6. Render, build, deploy
 
 1. Copy the template from `chute_template/vocence_chute.py.jinja2` and replace the placeholders:
    - `{{ huggingface_repository_name }}` → your repo ID  
@@ -65,27 +157,38 @@ All other wrapper code is fixed. Changing anything else causes **wrapper integri
 
 ---
 
-## 6. Wrapper integrity (owner, not validators)
+## 7. Owner validation (when your miner is registered)
 
-**The owner** (central service) verifies that your deployed chute uses the canonical wrapper:
+**The owner** (central service) — not validators — runs the following checks against your registration. Any one failure marks you invalid until you fix it and re-register. Validators just call `/health` and `/speak`; they do **not** repeat these checks.
 
-1. Owner fetches your **deploy script** from the Chutes API (`GET /chutes/code/{chute_id}`).
-2. If the fetch fails → participant marked invalid (`chute_code_fetch_failed`).
-3. Owner masks the four approved variables (replaces their values with a placeholder), normalizes the source (AST), and hashes it.
-4. Owner compares this hash to the hash of the canonical template (same masking). If they differ → invalid (`wrapper_hash_mismatch`).
+| # | Check | Failure reason |
+|---|-------|----------------|
+| 1 | Chute exists in Chutes API | `chute_fetch_failed` |
+| 2 | Chute name (Chutes-side) contains `vocence` | `chute_name_missing_vocence` |
+| 3 | Wrapper integrity: deploy script hash matches canonical (masking the 4 approved vars) | `wrapper_hash_mismatch` / `chute_code_fetch_failed` |
+| 4 | Chute is hot | `chute_not_running` |
+| 5 | `VOCENCE_REVISION` is a 40-char hex sha (not `main`/tag) | `wrapper_revision_not_sha:...` |
+| 6 | `VOCENCE_REPO`/`VOCENCE_REVISION` in the wrapper match what's committed on chain | `repo_mismatch:...` / `revision_mismatch:wrapper=...` |
+| 7 | HF revision round-trips (committed sha equals what HF resolves) | `revision_mismatch:hf=...` |
+| 8 | HF model fingerprint is computable | `hf_model_fetch_failed` |
+| 9 | Total LFS bytes in repo ≥ **20 MiB** | `repo_below_min_weight_bytes:<actual>` |
+| 10 | `vocence_config.yaml` exists and `model_id` equals `VOCENCE_REPO` | `vocence_config_fetch_failed` / `vocence_config_missing_model_id` / `model_id_mismatch:yaml=...` |
+| 11 | `miner.py` passes the source audit (section 4) | `miner_py_fetch_failed` / `banned_call:...` / `banned_import:...` / `from_pretrained_must_use_model_id` |
 
-Validators **do not** perform this check. They only call your `/health` and `/speak` endpoints for scoring. So: keep the wrapper unchanged except for the four variables; the owner will confirm that and set your participant validity accordingly.
+After all per-miner checks pass, the owner also runs **duplicate detection** across miners: if two miners' model weights produce the same fingerprint, only the earliest commit block keeps `is_valid = True`; later ones flip to `duplicate_model:earliest_uid=...`.
+
+Checks 1–8 are the existing chute/HF/wrapper gates; **9–11 are the new model-pinning gates** described in section 4.
 
 ---
 
-## 7. API
+## 8. API
 
 - **GET /health** — Returns `status`, `hf_repo_id`, `hf_revision`, `model_loaded`, `sample_rate`, `adapter`.
 - **POST /speak** — JSON: `{"instruction": "...", "text": "..."}`. Response: `audio/wav` (raw WAV bytes).
 
 ---
 
-## 8. Example and references
+## 9. Example and references
 
 - **example_repo/** — Mock HF repo layout: `miner.py`, `chute_config.yml`, `vocence_config.yaml`. Replace with your real engine and model files.
 - **chute_template/** — Canonical Jinja2 template; render with your four variables and use as the deploy script.
