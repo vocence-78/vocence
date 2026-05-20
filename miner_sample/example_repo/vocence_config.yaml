@@ -1,4 +1,7 @@
-# Optional PromptTTS settings read by your miner.py. Example values.
+# PromptTTS settings read by the canonical wrapper and your miner.py.
+# model_id MUST equal VOCENCE_REPO (the HF repo you commit on chain) — the wrapper
+# refuses to start otherwise. miner.py must load weights via from_pretrained(model_id).
+model_id: "your-hf-user/your-repo-name"
 
 runtime:
   adapter: "example"
