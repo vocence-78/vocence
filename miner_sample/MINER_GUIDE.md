@@ -21,7 +21,7 @@ Your HF repo must include:
 | `miner.py` | Yes | PromptTTS engine: class `Miner`, `__init__(path_hf_repo: Path)`, `warmup()`, `generate_wav(instruction, text)` → `(waveform, sample_rate)`. |
 | `chute_config.yml` | Yes | Image (base, pip), NodeSelector (GPU), Chute (tagline, scaling). Used at build time. |
 | `vocence_config.yaml` | Yes | **Must declare `model_id` matching your committed `VOCENCE_REPO`** (see section 4). May also carry runtime/generation options read by your engine. |
-| Model weight files | Yes | The repo must contain at least **20 MiB** of LFS weight data — empty / placeholder repos are rejected. |
+| `*.safetensors` weight files | Yes | Weights MUST be shipped as `.safetensors`. The combined size of all `.safetensors` files must be at least **50 MiB**. Pickle-format weights (`.bin`/`.pt`/`.pth`/`.ckpt`) are not accepted. |
 
 All engine logic must live in `miner.py`; only stdlib and site-packages may be imported (no other repo files). See **section 4** for the exact rules on what `miner.py` is allowed to do.
 
@@ -161,6 +161,8 @@ All other wrapper code is fixed. Changing anything else causes **wrapper integri
 
 **The owner** (central service) — not validators — runs the following checks against your registration. Any one failure marks you invalid until you fix it and re-register. Validators just call `/health` and `/speak`; they do **not** repeat these checks.
 
+Validation runs on a **1-hour cycle**. Each new `(model, revision)` is audited once when it's first seen and the result is cached in the owner's database — subsequent cycles only re-check the chute-side state (still hot? still owned?). The expensive checks (download weights, compute tensor fingerprint) never run twice for the same commit.
+
 | # | Check | Failure reason |
 |---|-------|----------------|
 | 1 | Chute exists in Chutes API | `chute_fetch_failed` |
@@ -171,13 +173,20 @@ All other wrapper code is fixed. Changing anything else causes **wrapper integri
 | 6 | `VOCENCE_REPO`/`VOCENCE_REVISION` in the wrapper match what's committed on chain | `repo_mismatch:...` / `revision_mismatch:wrapper=...` |
 | 7 | HF revision round-trips (committed sha equals what HF resolves) | `revision_mismatch:hf=...` |
 | 8 | HF model fingerprint is computable | `hf_model_fetch_failed` |
-| 9 | Total LFS bytes in repo ≥ **20 MiB** | `repo_below_min_weight_bytes:<actual>` |
-| 10 | `vocence_config.yaml` exists and `model_id` equals `VOCENCE_REPO` | `vocence_config_fetch_failed` / `vocence_config_missing_model_id` / `model_id_mismatch:yaml=...` |
-| 11 | `miner.py` passes the source audit (section 4) | `miner_py_fetch_failed` / `banned_call:...` / `banned_import:...` / `from_pretrained_must_use_model_id` |
+| 9 | Repo contains `.safetensors` files | `safetensors_missing` |
+| 10 | Combined size of `.safetensors` files ≥ **50 MiB** | `safetensors_below_min_size:<actual><threshold>` |
+| 11 | `vocence_config.yaml` exists and `model_id` equals `VOCENCE_REPO` | `vocence_config_missing` / `vocence_config_missing_model_id` / `model_id_mismatch:yaml=...` |
+| 12 | `miner.py` passes the source audit (section 4) | `miner_py_missing` / `banned_call:...` / `banned_import:...` / `from_pretrained_must_use_model_id` |
+| 13 | Per-tensor fingerprint computed and persisted to `repo_tensor_fingerprints` | `tensor_fingerprint_failed` |
 
-After all per-miner checks pass, the owner also runs **duplicate detection** across miners: if two miners' model weights produce the same fingerprint, only the earliest commit block keeps `is_valid = True`; later ones flip to `duplicate_model:earliest_uid=...`.
+After all per-miner checks pass, the owner runs **two passes of duplicate detection** across miners. The rule is the same in both passes: earliest commit block keeps `is_valid = True`, later miners flip to invalid.
 
-Checks 1–8 are the existing chute/HF/wrapper gates; **9–11 are the new model-pinning gates** described in section 4.
+- **`model_hash` byte-equality** — catches lazy copies where weight files are bit-for-bit identical. Failure reason: `duplicate_model:earliest_uid=<uid>`.
+- **Per-tensor fingerprint** — catches repackaging attacks that produce the same tensor values under different file layout (rename, re-shard, format conversion, non-LFS escape) plus partial-copy attacks where most layers are reused. Two thresholds:
+  - 100% of tensors bit-identical → `tensor_clone_of:earliest_uid=<uid>`
+  - ≥85% of tensors bit-identical → `tensor_near_clone_of:earliest_uid=<uid>:ratio=<r>`
+
+Checks 1–8 are the existing chute/HF/wrapper gates; **9–13 plus tensor-fingerprint dedup are the new model-pinning gates** described in section 4.
 
 ---
 

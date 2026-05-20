@@ -32,7 +32,7 @@ from vocence.registry.persistence.repositories.miner_repository import MinerRepo
 from vocence.registry.persistence.repositories.blocklist_repository import BlocklistRepository
 from vocence.adapters.chain import parse_commitment, validate_commitment_fields
 from vocence.domain.entities import ParticipantInfo
-from vocence.registry.validation import validate_miner, detect_duplicates
+from vocence.registry.validation import validate_miner, detect_duplicates, detect_tensor_duplicates
 from vocence.gateway.http.service.endpoints.status import record_last_sync
 
 
@@ -180,9 +180,14 @@ class ParticipantValidationTask:
                 participant_infos.append(owner_info)
                 emit_log(f"Injected owner participant: uid={OWNER_UID}, hotkey={OWNER_HOTKEY[:12]}..., block={BASE_MODEL_COMMIT_BLOCK}", "info")
 
-            # Apply duplicate detection on validated miners (same model_hash → only earliest block stays valid)
+            # Duplicate detection runs in two passes:
+            #   1) model_hash byte-equality (cheap; catches lazy copies)
+            #   2) per-tensor fingerprint (catches repackaging tricks: rename, re-shard,
+            #      format conversion, non-LFS) by reading repo_tensor_fingerprints
+            # Both follow the same rule: earliest commit block keeps is_valid.
             if participant_infos:
                 participant_infos = detect_duplicates(participant_infos)
+                participant_infos = await detect_tensor_duplicates(participant_infos)
 
             # Merge duplicate-filtered validated miners with earlier invalid/blocked entries
             for info in participant_infos:

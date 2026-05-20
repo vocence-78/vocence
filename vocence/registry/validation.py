@@ -49,10 +49,10 @@ CHUTE_NAME_MAGIC_WORD = "vocence"
 # Weight file extensions for TTS models (include common formats)
 WEIGHT_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".onnx")
 
-# Repos with less than this much weight data are rejected. Real PromptTTS models are
-# easily tens-to-hundreds of MB; an empty / placeholder repo is almost always a sign
-# the miner is loading weights from somewhere else at runtime.
-MIN_REPO_WEIGHT_BYTES = 20 * 1024 * 1024  # 20 MiB
+# Miners MUST ship weights as .safetensors. Pickle-based formats (.pt/.bin) are an RCE
+# surface, and forcing one canonical format lets us fingerprint tensors deterministically
+# (see audit_repo_artifacts). Below this floor a repo cannot hold a real PromptTTS model.
+MIN_SAFETENSORS_BYTES = 50 * 1024 * 1024  # 50 MiB
 
 # Cache for model hashes: (model, revision) -> ((hash, actual_revision), cached_at)
 _model_hash_cache: Dict[Tuple[str, str], Tuple[Optional[Tuple[str, str]], float]] = {}
@@ -122,31 +122,37 @@ async def _fetch_blacklist_from_api() -> set:
             return set()
 
 
-def _sum_lfs_bytes(siblings: List[Any]) -> int:
-    """Sum the LFS byte sizes of files in an HF repo's siblings list.
+def _list_safetensors_files(siblings: List[Any]) -> List[Tuple[str, int]]:
+    """Return [(filename, lfs_size_bytes), ...] for .safetensors files in the repo.
 
-    Anything HF stores via LFS is by definition large enough to be a real model
-    asset (~10 MiB+). A repo with very little (or no) LFS data is almost always
-    a placeholder pointing at someone else's model at runtime.
+    Only LFS-tracked safetensors are counted (regular git blobs can't realistically
+    hold a 50 MB+ model). Files without an LFS entry are skipped.
     """
-    total = 0
+    def _get_name(s: Any) -> str:
+        return getattr(s, "rfilename", None) or getattr(s, "path", "") or ""
+
+    out: List[Tuple[str, int]] = []
     for s in siblings:
+        name = _get_name(s)
+        if not name.endswith(".safetensors"):
+            continue
         lfs = getattr(s, "lfs", None)
         if lfs is None:
             continue
         size = lfs.get("size") if isinstance(lfs, dict) else getattr(lfs, "size", None)
-        if size:
-            try:
-                total += int(size)
-            except (TypeError, ValueError):
-                continue
-    return total
+        if not size:
+            continue
+        try:
+            out.append((name, int(size)))
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
-async def get_repo_lfs_bytes(model_id: str, revision: str) -> Optional[int]:
-    """Return the total LFS byte size across all files in an HF repo at a revision.
+async def get_safetensors_files(model_id: str, revision: str) -> Optional[List[Tuple[str, int]]]:
+    """Return [(filename, size)] of .safetensors files in an HF repo at a revision.
 
-    Used by the minimum-weight check. None on fetch failure.
+    Returns [] if the repo has none, or None on transient HF fetch failure.
     """
     def _fetch(token):
         return HfApi(token=token).repo_info(
@@ -158,9 +164,41 @@ async def get_repo_lfs_bytes(model_id: str, revision: str) -> Optional[int]:
     try:
         info = await asyncio.to_thread(_fetch, HF_AUTH_TOKEN or None)
     except Exception as e:
-        emit_log(f"repo_info failed for {model_id}@{revision} (lfs sum): {e}", "warn")
+        emit_log(f"repo_info failed for {model_id}@{revision} (safetensors): {e}", "warn")
         return None
-    return _sum_lfs_bytes(getattr(info, "siblings", None) or [])
+    return _list_safetensors_files(getattr(info, "siblings", None) or [])
+
+
+def fingerprint_safetensors_file(path: str) -> Dict[str, str]:
+    """Compute per-tensor SHA-256 hashes for one .safetensors file.
+
+    Parses the safetensors header (8-byte little-endian length + JSON metadata)
+    directly, then hashes each tensor's raw byte range tagged with (name, dtype, shape).
+    No torch / safetensors dependency — we just need byte hashes, not the values.
+
+    Returns {tensor_name: hex_sha256}.
+    """
+    import json as _json
+    out: Dict[str, str] = {}
+    with open(path, "rb") as f:
+        header_len = int.from_bytes(f.read(8), "little")
+        header = _json.loads(f.read(header_len).decode("utf-8"))
+        data_start = f.tell()
+        for name, meta in header.items():
+            if name == "__metadata__":
+                continue
+            offsets = meta.get("data_offsets")
+            if not (isinstance(offsets, list) and len(offsets) == 2):
+                continue
+            dtype = meta.get("dtype", "")
+            shape = tuple(meta.get("shape", []) or [])
+            f.seek(data_start + int(offsets[0]))
+            blob = f.read(int(offsets[1]) - int(offsets[0]))
+            h = hashlib.sha256()
+            h.update(f"{name}|{dtype}|{shape}|".encode())
+            h.update(blob)
+            out[name] = h.hexdigest()
+    return out
 
 
 def _fetch_repo_text_file(model_id: str, revision: str, filename: str) -> Optional[str]:
@@ -197,10 +235,10 @@ def _fetch_repo_text_file(model_id: str, revision: str, filename: str) -> Option
 
 @dataclass(frozen=True)
 class RepoArtifactAudit:
-    """Result of the immutable repo-level checks: lfs size + vocence_config + miner.py."""
+    """Result of the immutable repo-level checks: safetensors size + vocence_config + miner.py + tensor fingerprint."""
     is_valid: bool
     invalid_reason: Optional[str]
-    lfs_bytes: int
+    safetensors_bytes: int
 
 
 # (model_id, revision) -> (audit_result, cached_at). Only successful or
@@ -209,12 +247,76 @@ class RepoArtifactAudit:
 _repo_artifact_cache: Dict[Tuple[str, str], Tuple[RepoArtifactAudit, float]] = {}
 
 
+async def _compute_and_store_fingerprint(
+    model_id: str,
+    revision: str,
+    safetensors_files: List[Tuple[str, int]],
+) -> Optional[bool]:
+    """Compute per-tensor fingerprint by downloading each .safetensors file, parse,
+    accumulate hashes, persist to repo_tensor_fingerprints. Returns:
+      - True on success
+      - False on permanent failure (parse error, no tensors found)
+      - None on transient HF failure (caller should retry next cycle)
+
+    Safe to skip the download if an entry for (model_id, revision) already exists
+    in the DB — fingerprint rows are immutable.
+    """
+    from vocence.registry.persistence.repositories.repo_tensor_fingerprint_repository import (
+        RepoTensorFingerprintRepository,
+    )
+    fp_repo = RepoTensorFingerprintRepository()
+    existing = await fp_repo.get(model_id, revision)
+    if existing is not None and existing:
+        return True  # already audited and persisted; nothing to do
+
+    tensors: Dict[str, str] = {}
+    total_bytes = 0
+    for filename, size in safetensors_files:
+        try:
+            path = await asyncio.to_thread(
+                hf_hub_download,
+                repo_id=model_id,
+                filename=filename,
+                revision=revision,
+                repo_type="model",
+                token=HF_AUTH_TOKEN or None,
+            )
+        except (EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError) as e:
+            emit_log(f"safetensors {filename} missing in {model_id}@{revision}: {e}", "warn")
+            return False
+        except Exception as e:
+            emit_log(f"transient HF error downloading {filename}: {e}", "warn")
+            return None
+        try:
+            per_file = await asyncio.to_thread(fingerprint_safetensors_file, path)
+        except Exception as e:
+            emit_log(f"safetensors parse failed for {filename}: {e}", "warn")
+            return False
+        tensors.update(per_file)
+        total_bytes += size
+
+    if not tensors:
+        emit_log(f"safetensors had no tensors for {model_id}@{revision}", "warn")
+        return False
+
+    await fp_repo.upsert(model_id, revision, total_bytes, tensors)
+    return True
+
+
 async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArtifactAudit]:
-    """Run the three immutable per-repo checks once and cache by (model_id, revision).
+    """Run all immutable per-repo checks once and cache by (model_id, revision).
 
     Repo content at a pinned HF sha cannot change, so once we've audited a (repo, sha)
-    pair we never refetch it. Returns None when HF fetch fails transiently; the
-    caller should treat that as "retry next cycle", not "miner is invalid".
+    pair we never refetch it: process-level in-memory cache + DB-persisted tensor
+    fingerprint mean each unique commit is downloaded at most once, ever.
+
+    Steps:
+      1. .safetensors files present and totaling >= MIN_SAFETENSORS_BYTES
+      2. vocence_config.yaml declares model_id == model
+      3. miner.py source audit (from_pretrained(model_id), no banned calls/imports)
+      4. tensor fingerprint computed and persisted to repo_tensor_fingerprints
+
+    Returns None on transient HF errors so the caller can retry on the next cycle.
     """
     key = (model_id, revision)
     now = time.time()
@@ -223,15 +325,22 @@ async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArt
         if now - cached_at < MODEL_FINGERPRINT_CACHE_TTL:
             return cached
 
-    # 1. Minimum weight bytes.
-    lfs_bytes = await get_repo_lfs_bytes(model_id, revision)
-    if lfs_bytes is None:
+    # 1. Safetensors presence + minimum size. Miners must ship weights as .safetensors
+    # so we can compute tensor-level fingerprints; pickle-format weights are also a
+    # remote-code-execution surface we don't want on the owner.
+    files = await get_safetensors_files(model_id, revision)
+    if files is None:
         return None  # transient
-    if lfs_bytes < MIN_REPO_WEIGHT_BYTES:
+    if not files:
+        result = RepoArtifactAudit(False, "safetensors_missing", 0)
+        _repo_artifact_cache[key] = (result, now)
+        return result
+    total_safetensors = sum(size for _, size in files)
+    if total_safetensors < MIN_SAFETENSORS_BYTES:
         result = RepoArtifactAudit(
             False,
-            f"repo_below_min_weight_bytes:{lfs_bytes}<{MIN_REPO_WEIGHT_BYTES}",
-            lfs_bytes,
+            f"safetensors_below_min_size:{total_safetensors}<{MIN_SAFETENSORS_BYTES}",
+            total_safetensors,
         )
         _repo_artifact_cache[key] = (result, now)
         return result
@@ -243,12 +352,12 @@ async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArt
         emit_log(f"transient HF error fetching vocence_config.yaml: {e}", "warn")
         return None
     if yaml_text is None:
-        result = RepoArtifactAudit(False, "vocence_config_missing", lfs_bytes)
+        result = RepoArtifactAudit(False, "vocence_config_missing", total_safetensors)
         _repo_artifact_cache[key] = (result, now)
         return result
     ok, reason = verify_vocence_config(yaml_text, model_id)
     if not ok:
-        result = RepoArtifactAudit(False, reason or "vocence_config_invalid", lfs_bytes)
+        result = RepoArtifactAudit(False, reason or "vocence_config_invalid", total_safetensors)
         _repo_artifact_cache[key] = (result, now)
         return result
 
@@ -259,16 +368,27 @@ async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArt
         emit_log(f"transient HF error fetching miner.py: {e}", "warn")
         return None
     if miner_src is None:
-        result = RepoArtifactAudit(False, "miner_py_missing", lfs_bytes)
+        result = RepoArtifactAudit(False, "miner_py_missing", total_safetensors)
         _repo_artifact_cache[key] = (result, now)
         return result
     ok, reason = verify_miner_source(miner_src)
     if not ok:
-        result = RepoArtifactAudit(False, reason or "miner_py_invalid", lfs_bytes)
+        result = RepoArtifactAudit(False, reason or "miner_py_invalid", total_safetensors)
         _repo_artifact_cache[key] = (result, now)
         return result
 
-    result = RepoArtifactAudit(True, None, lfs_bytes)
+    # 4. Tensor fingerprint — compute and persist to DB (if not already there).
+    # We pay the download cost once per (repo, sha) here, then detect_tensor_duplicates
+    # uses the cached fingerprint for cross-miner comparison.
+    fp_status = await _compute_and_store_fingerprint(model_id, revision, files)
+    if fp_status is None:
+        return None  # transient
+    if fp_status is False:
+        result = RepoArtifactAudit(False, "tensor_fingerprint_failed", total_safetensors)
+        _repo_artifact_cache[key] = (result, now)
+        return result
+
+    result = RepoArtifactAudit(True, None, total_safetensors)
     _repo_artifact_cache[key] = (result, now)
     return result
 
@@ -551,11 +671,11 @@ def detect_duplicates(miners: List[ParticipantInfo]) -> List[ParticipantInfo]:
     for model_hash, group in hash_to_miners.items():
         if len(group) <= 1:
             continue
-        
+
         # Sort by block (earliest first), then by UID
         group.sort(key=lambda x: (x[0], x[1]))
         earliest_block, earliest_uid, _ = group[0]
-        
+
         # Mark duplicates as invalid
         for block, uid, miner in group[1:]:
             if miner.is_valid:
@@ -566,6 +686,97 @@ def detect_duplicates(miners: List[ParticipantInfo]) -> List[ParticipantInfo]:
                     f"(hash={model_hash[:16]}...)",
                     "warn"
                 )
-    
+
+    return miners
+
+
+# Fraction of per-tensor hashes that must match an earlier miner for the later one
+# to be marked a duplicate. Below 1.0 catches partial-copy attacks (clone most layers,
+# tweak a few); 1.0 alone would only catch exact clones with identical packaging.
+TENSOR_NEAR_CLONE_THRESHOLD = 0.85
+
+
+def _tensor_match_ratio(earlier: Dict[str, str], later: Dict[str, str]) -> float:
+    """Fraction of tensors in `later` that are bit-identical to the same-name tensor in `earlier`.
+
+    Denominator is len(later) so the ratio is robust to architecture mismatch — a
+    legitimately different model with no shared tensor names yields 0.0, not divide-by-zero.
+    """
+    if not later:
+        return 0.0
+    matching = sum(1 for k, v in later.items() if earlier.get(k) == v)
+    return matching / len(later)
+
+
+async def detect_tensor_duplicates(miners: List[ParticipantInfo]) -> List[ParticipantInfo]:
+    """Mark later-committed miners as duplicate if their per-tensor fingerprint
+    overlaps a strictly earlier miner's by >= TENSOR_NEAR_CLONE_THRESHOLD.
+
+    Catches the byte-level repackaging tricks the file-hash check misses
+    (rename, re-shard, format conversion, non-LFS escape) and partial-copy attacks
+    where the cheater replaces only a few layers. ε-noise on every tensor still
+    slips through — that's the explicit accepted gap (see scoring docs).
+
+    Fingerprints come from the repo_tensor_fingerprints table, populated by
+    audit_repo_artifacts the first time each unique (model, revision) is seen.
+    """
+    from vocence.registry.persistence.repositories.repo_tensor_fingerprint_repository import (
+        RepoTensorFingerprintRepository,
+    )
+
+    keys = [
+        (m.model_name, m.model_revision)
+        for m in miners
+        if m.is_valid and m.model_name and m.model_revision
+    ]
+    if not keys:
+        return miners
+
+    fp_repo = RepoTensorFingerprintRepository()
+    fingerprints = await fp_repo.get_many(keys)
+    if not fingerprints:
+        return miners
+
+    # Only compare miners we have fingerprints for, in earliest-commit-first order.
+    candidates = [
+        m for m in miners
+        if m.is_valid and (m.model_name, m.model_revision) in fingerprints
+    ]
+    candidates.sort(key=lambda m: ((m.block or 0), m.uid))
+
+    for i, later in enumerate(candidates):
+        if not later.is_valid:
+            continue
+        fp_later = fingerprints[(later.model_name, later.model_revision)]
+        for earlier in candidates[:i]:
+            if not earlier.is_valid:
+                continue
+            # Skip self-pair when two miners share a (model, revision); the
+            # model_hash dedup pass above already handled that case.
+            if (earlier.model_name, earlier.model_revision) == (later.model_name, later.model_revision):
+                continue
+            fp_earlier = fingerprints[(earlier.model_name, earlier.model_revision)]
+            ratio = _tensor_match_ratio(fp_earlier, fp_later)
+            if ratio >= 1.0:
+                later.is_valid = False
+                later.invalid_reason = f"tensor_clone_of:earliest_uid={earlier.uid}"
+                emit_log(
+                    f"Tensor clone: uid={later.uid} matches uid={earlier.uid} "
+                    f"({len(fp_later)} tensors, ratio=1.00)",
+                    "warn",
+                )
+                break
+            if ratio >= TENSOR_NEAR_CLONE_THRESHOLD:
+                later.is_valid = False
+                later.invalid_reason = (
+                    f"tensor_near_clone_of:earliest_uid={earlier.uid}:ratio={ratio:.3f}"
+                )
+                emit_log(
+                    f"Tensor near-clone: uid={later.uid} matches uid={earlier.uid} "
+                    f"at ratio={ratio:.3f}",
+                    "warn",
+                )
+                break
+
     return miners
 
