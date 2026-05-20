@@ -9,10 +9,20 @@ import os
 import asyncio
 import hashlib
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub.utils import (
+    EntryNotFoundError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+)
+
+
+class _TransientHFError(RuntimeError):
+    """HF fetch failed transiently (network / 5xx). Caller should retry, not cache."""
 
 from vocence.domain.config import (
     HF_AUTH_TOKEN,
@@ -156,8 +166,11 @@ async def get_repo_lfs_bytes(model_id: str, revision: str) -> Optional[int]:
 def _fetch_repo_text_file(model_id: str, revision: str, filename: str) -> Optional[str]:
     """Fetch a single text file from an HF repo at a pinned revision.
 
-    Returns the file contents or None if the file is missing / fetch failed.
-    Used for the miner.py and vocence_config.yaml audits.
+    Returns the file contents, or None if the file/repo/revision does not exist
+    (permanent for this (model, revision) — safe to cache as invalid).
+
+    Raises _TransientHFError on network / server failures so the caller can skip
+    caching and retry on the next validation cycle.
     """
     try:
         path = hf_hub_download(
@@ -167,15 +180,97 @@ def _fetch_repo_text_file(model_id: str, revision: str, filename: str) -> Option
             repo_type="model",
             token=HF_AUTH_TOKEN or None,
         )
-    except Exception as e:
-        emit_log(f"hf_hub_download failed for {model_id}@{revision}/{filename}: {e}", "warn")
+    except (EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError) as e:
+        emit_log(f"hf file missing for {model_id}@{revision}/{filename}: {e}", "warn")
         return None
+    except Exception as e:
+        raise _TransientHFError(f"{model_id}@{revision}/{filename}: {e}") from e
     try:
         with open(path, encoding="utf-8") as f:
             return f.read()
     except Exception as e:
-        emit_log(f"read failed for {model_id}@{revision}/{filename}: {e}", "warn")
+        raise _TransientHFError(f"read {model_id}@{revision}/{filename}: {e}") from e
+
+
+# --- Per-repo artifact audit (immutable per pinned sha; cached for re-validation) ---
+
+
+@dataclass(frozen=True)
+class RepoArtifactAudit:
+    """Result of the immutable repo-level checks: lfs size + vocence_config + miner.py."""
+    is_valid: bool
+    invalid_reason: Optional[str]
+    lfs_bytes: int
+
+
+# (model_id, revision) -> (audit_result, cached_at). Only successful or
+# permanent-failure audits are cached; transient HF errors fall through so the
+# next validation pass retries.
+_repo_artifact_cache: Dict[Tuple[str, str], Tuple[RepoArtifactAudit, float]] = {}
+
+
+async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArtifactAudit]:
+    """Run the three immutable per-repo checks once and cache by (model_id, revision).
+
+    Repo content at a pinned HF sha cannot change, so once we've audited a (repo, sha)
+    pair we never refetch it. Returns None when HF fetch fails transiently; the
+    caller should treat that as "retry next cycle", not "miner is invalid".
+    """
+    key = (model_id, revision)
+    now = time.time()
+    if key in _repo_artifact_cache:
+        cached, cached_at = _repo_artifact_cache[key]
+        if now - cached_at < MODEL_FINGERPRINT_CACHE_TTL:
+            return cached
+
+    # 1. Minimum weight bytes.
+    lfs_bytes = await get_repo_lfs_bytes(model_id, revision)
+    if lfs_bytes is None:
+        return None  # transient
+    if lfs_bytes < MIN_REPO_WEIGHT_BYTES:
+        result = RepoArtifactAudit(
+            False,
+            f"repo_below_min_weight_bytes:{lfs_bytes}<{MIN_REPO_WEIGHT_BYTES}",
+            lfs_bytes,
+        )
+        _repo_artifact_cache[key] = (result, now)
+        return result
+
+    # 2. vocence_config.yaml.
+    try:
+        yaml_text = await asyncio.to_thread(_fetch_repo_text_file, model_id, revision, "vocence_config.yaml")
+    except _TransientHFError as e:
+        emit_log(f"transient HF error fetching vocence_config.yaml: {e}", "warn")
         return None
+    if yaml_text is None:
+        result = RepoArtifactAudit(False, "vocence_config_missing", lfs_bytes)
+        _repo_artifact_cache[key] = (result, now)
+        return result
+    ok, reason = verify_vocence_config(yaml_text, model_id)
+    if not ok:
+        result = RepoArtifactAudit(False, reason or "vocence_config_invalid", lfs_bytes)
+        _repo_artifact_cache[key] = (result, now)
+        return result
+
+    # 3. miner.py source audit.
+    try:
+        miner_src = await asyncio.to_thread(_fetch_repo_text_file, model_id, revision, "miner.py")
+    except _TransientHFError as e:
+        emit_log(f"transient HF error fetching miner.py: {e}", "warn")
+        return None
+    if miner_src is None:
+        result = RepoArtifactAudit(False, "miner_py_missing", lfs_bytes)
+        _repo_artifact_cache[key] = (result, now)
+        return result
+    ok, reason = verify_miner_source(miner_src)
+    if not ok:
+        result = RepoArtifactAudit(False, reason or "miner_py_invalid", lfs_bytes)
+        _repo_artifact_cache[key] = (result, now)
+        return result
+
+    result = RepoArtifactAudit(True, None, lfs_bytes)
+    _repo_artifact_cache[key] = (result, now)
+    return result
 
 
 async def get_model_fingerprint(model_id: str, revision: str) -> Optional[Tuple[str, str]]:
@@ -406,51 +501,24 @@ async def validate_miner(
         emit_log(f"uid {uid} ({hotkey[:12]}...): failed at revision_hf_match", "warn")
         return info
 
-    # Step 6: Minimum weight bytes — block empty/placeholder repos that exist only to
-    # point miner.py at someone else's model.
-    lfs_bytes = await get_repo_lfs_bytes(model_name, model_revision)
-    if lfs_bytes is None:
-        info.invalid_reason = "hf_lfs_size_fetch_failed"
-        emit_log(f"uid {uid} ({hotkey[:12]}...): failed at lfs_size_fetch", "warn")
+    # Steps 6-8: immutable repo-content checks (min weight bytes, vocence_config.yaml,
+    # miner.py source audit). Bundled and cached by (model, revision) — HF content at
+    # a pinned sha never changes, so we audit each unique (repo, sha) exactly once.
+    audit = await audit_repo_artifacts(model_name, model_revision)
+    if audit is None:
+        info.invalid_reason = "repo_audit_fetch_failed"
+        emit_log(f"uid {uid} ({hotkey[:12]}...): transient HF fetch error, will retry next cycle", "warn")
         return info
-    if lfs_bytes < MIN_REPO_WEIGHT_BYTES:
-        info.invalid_reason = f"repo_below_min_weight_bytes:{lfs_bytes}<{MIN_REPO_WEIGHT_BYTES}"
-        emit_log(
-            f"uid {uid} ({hotkey[:12]}...): failed at min_weight_bytes "
-            f"({lfs_bytes:,} < {MIN_REPO_WEIGHT_BYTES:,})",
-            "warn",
-        )
-        return info
-
-    # Step 7: vocence_config.yaml must declare model_id == model_name (= VOCENCE_REPO on chain).
-    yaml_text = await asyncio.to_thread(_fetch_repo_text_file, model_name, model_revision, "vocence_config.yaml")
-    if yaml_text is None:
-        info.invalid_reason = "vocence_config_fetch_failed"
-        emit_log(f"uid {uid} ({hotkey[:12]}...): failed at vocence_config_fetch", "warn")
-        return info
-    ok_yaml, yaml_reason = verify_vocence_config(yaml_text, model_name)
-    if not ok_yaml:
-        info.invalid_reason = yaml_reason or "vocence_config_invalid"
-        emit_log(f"uid {uid} ({hotkey[:12]}...): failed at vocence_config_audit ({yaml_reason})", "warn")
-        return info
-
-    # Step 8: miner.py source audit — must use from_pretrained(model_id), no external loaders.
-    miner_source = await asyncio.to_thread(_fetch_repo_text_file, model_name, model_revision, "miner.py")
-    if miner_source is None:
-        info.invalid_reason = "miner_py_fetch_failed"
-        emit_log(f"uid {uid} ({hotkey[:12]}...): failed at miner_py_fetch", "warn")
-        return info
-    ok_src, src_reason = verify_miner_source(miner_source)
-    if not ok_src:
-        info.invalid_reason = src_reason or "miner_py_invalid"
-        emit_log(f"uid {uid} ({hotkey[:12]}...): failed at miner_py_audit ({src_reason})", "warn")
+    if not audit.is_valid:
+        info.invalid_reason = audit.invalid_reason or "repo_audit_failed"
+        emit_log(f"uid {uid} ({hotkey[:12]}...): failed at repo_audit ({audit.invalid_reason})", "warn")
         return info
 
     info.is_valid = True
     emit_log(
         f"uid {uid} ({hotkey[:12]}...): passed chute_fetch, wrapper_integrity, chute_hot, "
         f"wrapper_revision_match, wrapper_repo_match, model_fingerprint, revision_hf_match, "
-        f"min_weight_bytes, vocence_config_audit, miner_py_audit",
+        f"repo_audit",
         "success",
     )
     return info
