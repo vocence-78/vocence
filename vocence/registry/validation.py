@@ -46,16 +46,10 @@ from vocence.registry.source_audit import verify_miner_source, verify_vocence_co
 # Checked against the chute name from Chutes API (e.g. vocence-parler-tts-010), not chute_id (UUID).
 CHUTE_NAME_MAGIC_WORD = "vocence"
 
-# Weight file extensions for TTS models (include common formats)
-WEIGHT_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".onnx")
-
 # Miners MUST ship weights as .safetensors. Pickle-based formats (.pt/.bin) are an RCE
 # surface, and forcing one canonical format lets us fingerprint tensors deterministically
 # (see audit_repo_artifacts). Below this floor a repo cannot hold a real PromptTTS model.
 MIN_SAFETENSORS_BYTES = 50 * 1024 * 1024  # 50 MiB
-
-# Cache for model hashes: (model, revision) -> ((hash, actual_revision), cached_at)
-_model_hash_cache: Dict[Tuple[str, str], Tuple[Optional[Tuple[str, str]], float]] = {}
 
 # Cache for API blacklist
 _api_blacklist_cache: Tuple[Set[str], float] = (set(), 0)
@@ -239,6 +233,10 @@ class RepoArtifactAudit:
     is_valid: bool
     invalid_reason: Optional[str]
     safetensors_bytes: int
+    # SHA-256 over the canonicalized tensor fingerprint dict — set when is_valid is True.
+    # Equal across two repos iff every tensor in both has identical name + content. This is
+    # the new model_hash used by detect_duplicates for fast exact-match dedup.
+    model_hash: Optional[str] = None
 
 
 # (model_id, revision) -> (audit_result, cached_at). Only successful or
@@ -247,19 +245,30 @@ class RepoArtifactAudit:
 _repo_artifact_cache: Dict[Tuple[str, str], Tuple[RepoArtifactAudit, float]] = {}
 
 
+def _model_hash_from_tensors(tensors: Dict[str, str]) -> str:
+    """SHA-256 over the canonical (sorted, compact) JSON form of {tensor_name: sha256}.
+
+    Same input → same output, independent of dict insertion order. Two repos that share
+    every tensor name + content hash collide here; any difference yields a different hash.
+    """
+    import json as _json
+    canonical = _json.dumps(tensors, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 async def _compute_and_store_fingerprint(
     model_id: str,
     revision: str,
     safetensors_files: List[Tuple[str, int]],
-) -> Optional[bool]:
-    """Compute per-tensor fingerprint by downloading each .safetensors file, parse,
-    accumulate hashes, persist to repo_tensor_fingerprints. Returns:
-      - True on success
-      - False on permanent failure (parse error, no tensors found)
-      - None on transient HF failure (caller should retry next cycle)
+) -> Optional[str]:
+    """Compute per-tensor fingerprint, persist to repo_tensor_fingerprints, return
+    the combined model_hash.
 
-    Safe to skip the download if an entry for (model_id, revision) already exists
-    in the DB — fingerprint rows are immutable.
+    Returns None on permanent failure (parse error, missing file, empty tensors).
+    Raises _TransientHFError on transient HF errors so the caller can retry without
+    caching the failure.
+
+    Skips the download if an entry for (model_id, revision) already exists.
     """
     from vocence.registry.persistence.repositories.repo_tensor_fingerprint_repository import (
         RepoTensorFingerprintRepository,
@@ -267,7 +276,7 @@ async def _compute_and_store_fingerprint(
     fp_repo = RepoTensorFingerprintRepository()
     existing = await fp_repo.get(model_id, revision)
     if existing is not None and existing:
-        return True  # already audited and persisted; nothing to do
+        return _model_hash_from_tensors(existing)
 
     tensors: Dict[str, str] = {}
     total_bytes = 0
@@ -283,24 +292,23 @@ async def _compute_and_store_fingerprint(
             )
         except (EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError) as e:
             emit_log(f"safetensors {filename} missing in {model_id}@{revision}: {e}", "warn")
-            return False
-        except Exception as e:
-            emit_log(f"transient HF error downloading {filename}: {e}", "warn")
             return None
+        except Exception as e:
+            raise _TransientHFError(f"download {filename}: {e}") from e
         try:
             per_file = await asyncio.to_thread(fingerprint_safetensors_file, path)
         except Exception as e:
             emit_log(f"safetensors parse failed for {filename}: {e}", "warn")
-            return False
+            return None
         tensors.update(per_file)
         total_bytes += size
 
     if not tensors:
         emit_log(f"safetensors had no tensors for {model_id}@{revision}", "warn")
-        return False
+        return None
 
     await fp_repo.upsert(model_id, revision, total_bytes, tensors)
-    return True
+    return _model_hash_from_tensors(tensors)
 
 
 async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArtifactAudit]:
@@ -378,101 +386,22 @@ async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArt
         return result
 
     # 4. Tensor fingerprint — compute and persist to DB (if not already there).
-    # We pay the download cost once per (repo, sha) here, then detect_tensor_duplicates
-    # uses the cached fingerprint for cross-miner comparison.
-    fp_status = await _compute_and_store_fingerprint(model_id, revision, files)
-    if fp_status is None:
-        return None  # transient
-    if fp_status is False:
-        result = RepoArtifactAudit(False, "tensor_fingerprint_failed", total_safetensors)
+    # The download cost is paid once per (repo, sha); detect_tensor_duplicates then
+    # uses the cached fingerprint for cross-miner comparison. The combined SHA-256
+    # of the tensor dict doubles as model_hash for the fast byte-equality dedup pass.
+    try:
+        model_hash = await _compute_and_store_fingerprint(model_id, revision, files)
+    except _TransientHFError as e:
+        emit_log(f"transient HF error computing tensor fingerprint: {e}", "warn")
+        return None
+    if model_hash is None:
+        result = RepoArtifactAudit(False, "tensor_fingerprint_failed", total_safetensors, None)
         _repo_artifact_cache[key] = (result, now)
         return result
 
-    result = RepoArtifactAudit(True, None, total_safetensors)
+    result = RepoArtifactAudit(True, None, total_safetensors, model_hash)
     _repo_artifact_cache[key] = (result, now)
     return result
-
-
-async def get_model_fingerprint(model_id: str, revision: str) -> Optional[Tuple[str, str]]:
-    """Get model hash and actual revision from HuggingFace.
-    
-    Computes a hash from all weight file SHA256s in the model repository.
-    Includes .safetensors, .bin, .pt, .pth, .ckpt files.
-    
-    Args:
-        model_id: HuggingFace model repo (e.g., "user/model-name")
-        revision: Git commit hash
-        
-    Returns:
-        Tuple of (model_hash, actual_revision) or None if failed
-    """
-    key = (model_id, revision)
-    now = time.time()
-    
-    if key in _model_hash_cache:
-        cached, cached_at = _model_hash_cache[key]
-        if now - cached_at < MODEL_FINGERPRINT_CACHE_TTL:
-            return cached
-    
-    def _fetch_repo_info(token):
-        return HfApi(token=token).repo_info(
-            repo_id=model_id,
-            repo_type="model",
-            revision=revision,
-            files_metadata=True,
-        )
-    
-    def _hash_from_info(info):
-        actual_revision = getattr(info, "sha", None)
-        siblings = getattr(info, "siblings", None) or []
-        def _get_filename(s):
-            return getattr(s, "rfilename", None) or getattr(s, "path", "") or ""
-        def _get_lfs_sha256(lfs_info):
-            if lfs_info is None:
-                return None
-            if isinstance(lfs_info, dict):
-                return lfs_info.get("sha256") or lfs_info.get("oid")
-            return getattr(lfs_info, "sha256", None) or getattr(lfs_info, "oid", None)
-        shas = set()
-        for sibling in siblings:
-            filename = _get_filename(sibling)
-            lfs_hash = _get_lfs_sha256(getattr(sibling, "lfs", None))
-            if not lfs_hash or not any(filename.endswith(ext) for ext in WEIGHT_EXTENSIONS):
-                continue
-            shas.add(str(lfs_hash))
-        if not actual_revision:
-            return None, False
-        if not shas:
-            return (hashlib.sha256(actual_revision.encode()).hexdigest(), actual_revision), True
-        return (hashlib.sha256("".join(sorted(shas)).encode()).hexdigest(), actual_revision), False
-    
-    try:
-        info = await asyncio.to_thread(_fetch_repo_info, HF_AUTH_TOKEN or None)
-        result, used_revision_fallback = _hash_from_info(info)
-        if result is None:
-            emit_log(f"No revision (sha) in model info for {model_id}@{revision}", "warn")
-            _model_hash_cache[key] = (None, now)
-            return None
-        if used_revision_fallback:
-            emit_log(f"No weight-file LFS hashes for {model_id}@{revision}; using revision-based fingerprint", "info")
-        _model_hash_cache[key] = (result, now)
-        return result
-        
-    except Exception as e:
-        err_msg = str(e)
-        if HF_AUTH_TOKEN and ("401" in err_msg or "Invalid username or password" in err_msg or "Invalid user token" in err_msg):
-            try:
-                emit_log(f"Retrying without HF token for {model_id}@{revision} (public repo)", "info")
-                info = await asyncio.to_thread(_fetch_repo_info, None)
-                result, _ = _hash_from_info(info)
-                if result is not None:
-                    _model_hash_cache[key] = (result, now)
-                    return result
-            except Exception as retry_e:
-                emit_log(f"Retry without token failed for {model_id}@{revision}: {retry_e}", "warn")
-        emit_log(f"Failed to fetch model info for {model_id}@{revision}: {type(e).__name__}: {e}", "warn")
-        _model_hash_cache[key] = (None, now)
-        return None
 
 
 async def validate_miner(
@@ -513,9 +442,9 @@ async def validate_miner(
         block=block,
     )
 
-    # Owner base-model chute: skip chute/wrapper checks. The HF repo has no weight files so
-    # get_model_fingerprint would fall back to a revision-based hash; pin BASE_MODEL_WEIGHTS_HASH
-    # instead so detect_duplicates catches miners copying the base model.
+    # Owner base-model chute: skip chute/wrapper/audit checks. The base model is shipped
+    # by the owner from a special repo that doesn't go through the safetensors pipeline;
+    # pin BASE_MODEL_WEIGHTS_HASH so detect_duplicates groups any miner who copies it.
     if chute_id == BASE_MODEL_CHUTE_ID:
         info.is_valid = True
         info.model_hash = BASE_MODEL_WEIGHTS_HASH
@@ -600,30 +529,11 @@ async def validate_miner(
         )
         return info
 
-    # Step 4: Fetch model info from HuggingFace
-    model_info = await get_model_fingerprint(model_name, model_revision)
-    if not model_info:
-        info.invalid_reason = "hf_model_fetch_failed"
-        emit_log(f"uid {uid} ({hotkey[:12]}...): failed at model_fingerprint", "warn")
-        return info
-
-    model_hash, hf_revision = model_info
-    # If a miner commits the owner base-model HF repo (same name + revision) from their own chute,
-    # pin the canonical weights hash so detect_duplicates groups them with the owner.
-    if model_name == BASE_MODEL_MODEL_NAME and model_revision == BASE_MODEL_MODEL_REVISION:
-        info.model_hash = BASE_MODEL_WEIGHTS_HASH
-    else:
-        info.model_hash = model_hash
-
-    # Step 5: Verify revision matches HuggingFace
-    if model_revision != hf_revision:
-        info.invalid_reason = f"revision_mismatch:hf={hf_revision}"
-        emit_log(f"uid {uid} ({hotkey[:12]}...): failed at revision_hf_match", "warn")
-        return info
-
-    # Steps 6-8: immutable repo-content checks (min weight bytes, vocence_config.yaml,
-    # miner.py source audit). Bundled and cached by (model, revision) — HF content at
-    # a pinned sha never changes, so we audit each unique (repo, sha) exactly once.
+    # Step 4: Immutable repo-content audit — safetensors presence + size,
+    # vocence_config.yaml, miner.py source, per-tensor fingerprint, and model_hash.
+    # Bundled and cached by (model, revision); each unique commit is audited once ever.
+    # Revision existence is checked implicitly: any HF call inside the audit raises
+    # RevisionNotFoundError if the pinned sha doesn't exist.
     audit = await audit_repo_artifacts(model_name, model_revision)
     if audit is None:
         info.invalid_reason = "repo_audit_fetch_failed"
@@ -634,11 +544,17 @@ async def validate_miner(
         emit_log(f"uid {uid} ({hotkey[:12]}...): failed at repo_audit ({audit.invalid_reason})", "warn")
         return info
 
+    # A miner who commits the owner base-model HF repo from their own chute is pinned
+    # to BASE_MODEL_WEIGHTS_HASH so detect_duplicates groups them with the owner.
+    if model_name == BASE_MODEL_MODEL_NAME and model_revision == BASE_MODEL_MODEL_REVISION:
+        info.model_hash = BASE_MODEL_WEIGHTS_HASH
+    else:
+        info.model_hash = audit.model_hash
+
     info.is_valid = True
     emit_log(
         f"uid {uid} ({hotkey[:12]}...): passed chute_fetch, wrapper_integrity, chute_hot, "
-        f"wrapper_revision_match, wrapper_repo_match, model_fingerprint, revision_hf_match, "
-        f"repo_audit",
+        f"wrapper_revision_match, wrapper_repo_match, repo_audit",
         "success",
     )
     return info
