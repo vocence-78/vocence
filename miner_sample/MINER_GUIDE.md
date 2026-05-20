@@ -8,7 +8,6 @@ Vocence is a voice intelligence subnet (PromptTTS, STT, STS, cloning, etc.). The
 
 - Chutes developer account and API key.
 - Hugging Face account (to host the miner repo).
-- GPU recommended (e.g. 1 GPU, 16GB+ VRAM for typical PromptTTS models).
 
 ---
 
@@ -20,7 +19,7 @@ Your HF repo must include:
 |------|----------|-------------|
 | `miner.py` | Yes | PromptTTS engine: class `Miner`, `__init__(path_hf_repo: Path)`, `warmup()`, `generate_wav(instruction, text)` → `(waveform, sample_rate)`. |
 | `chute_config.yml` | Yes | Image (base, pip), NodeSelector (GPU), Chute (tagline, scaling). Used at build time. |
-| `vocence_config.yaml` | Yes | **Must declare `model_id` matching your committed `VOCENCE_REPO`** (see section 4). May also carry runtime/generation options read by your engine. |
+| `vocence_config.yaml` | Yes | **Must declare `model_id` matching the `model_name` you committed on chain** (see section 4). May also carry runtime/generation options read by your engine. |
 | `*.safetensors` weight files | Yes | Weights MUST be shipped as `.safetensors`. The combined size of all `.safetensors` files must be at least **50 MiB**. Pickle-format weights (`.bin`/`.pt`/`.pth`/`.ckpt`) are not accepted. |
 
 All engine logic must live in `miner.py`; only stdlib and site-packages may be imported (no other repo files). See **section 4** for the exact rules on what `miner.py` is allowed to do.
@@ -41,16 +40,26 @@ The wrapper has already downloaded your repo and the HF cache is populated befor
 
 These rules are enforced **twice**: owner-side at registration (early rejection) and at chute startup by the canonical wrapper (hash-locked, can't be bypassed). They constrain **how** you load your model, not **what** your model is — every miner ships their own unique `miner.py`, with their own architecture, sampling, post-processing, and any other engine code they want.
 
+**Naming.** The same HF repo ID appears under three different names across the system; **all three must hold the same value** and the owner-side audit verifies it:
+
+| Where | Field name |
+|---|---|
+| On chain (your commitment JSON) | `model_name` |
+| In `vocence_config.yaml` | `model_id` |
+| In the rendered canonical wrapper | `VOCENCE_REPO` |
+
+When the docs say "your committed HF repo ID" they mean this single value, regardless of which name happens to apply at that layer.
+
 ### 4a. `vocence_config.yaml` must declare `model_id`
 
-The file must contain a top-level `model_id` field whose value equals `VOCENCE_REPO` (the HF repo ID you commit on chain):
+The file must contain a top-level `model_id` field whose value equals the HF repo ID you committed on chain (the `model_name` field in your commitment JSON):
 
 ```yaml
 model_id: "your-hf-user/your-repo-name"
 # ... your other runtime/generation settings below
 ```
 
-If `model_id` is missing, malformed, or doesn't match `VOCENCE_REPO`, the chute refuses to start and the owner marks the miner invalid (`model_id_mismatch:yaml=...`).
+If `model_id` is missing, malformed, or doesn't match the on-chain `model_name`, the chute refuses to start and the owner marks the miner invalid (`model_id_mismatch:yaml=...`).
 
 ### 4b. `from_pretrained` must use the `model_id` variable
 
@@ -137,7 +146,7 @@ The canonical wrapper is generated from the template in `chute_template/`. You m
 
 All other wrapper code is fixed. Changing anything else causes **wrapper integrity** to fail (see below).
 
-`VOCENCE_REPO` must equal the `model_id` field in your `vocence_config.yaml` (see section 4a).
+`VOCENCE_REPO` is the wrapper's rendered copy of the same HF repo ID you commit on chain as `model_name` and declare in `vocence_config.yaml` as `model_id` — see the naming table at the top of section 4. All three must match.
 
 ---
 
@@ -175,7 +184,7 @@ Validation runs on a **1-hour cycle**. Each new `(model, revision)` is audited o
 | 8 | HF model fingerprint is computable | `hf_model_fetch_failed` |
 | 9 | Repo contains `.safetensors` files | `safetensors_missing` |
 | 10 | Combined size of `.safetensors` files ≥ **50 MiB** | `safetensors_below_min_size:<actual><threshold>` |
-| 11 | `vocence_config.yaml` exists and `model_id` equals `VOCENCE_REPO` | `vocence_config_missing` / `vocence_config_missing_model_id` / `model_id_mismatch:yaml=...` |
+| 11 | `vocence_config.yaml` exists and its `model_id` equals the on-chain `model_name` | `vocence_config_missing` / `vocence_config_missing_model_id` / `model_id_mismatch:yaml=...` |
 | 12 | `miner.py` passes the source audit (section 4) | `miner_py_missing` / `banned_call:...` / `banned_import:...` / `from_pretrained_must_use_model_id` |
 | 13 | Per-tensor fingerprint computed and persisted to `repo_tensor_fingerprints` | `tensor_fingerprint_failed` |
 
