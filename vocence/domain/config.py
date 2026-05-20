@@ -164,7 +164,7 @@ SERVICE_RELOAD = (os.environ.get("SERVICE_RELOAD", "").lower() == "true")
 LOG_DIR = os.environ.get("LOG_DIR", "logs")
 
 # Background worker intervals (seconds)
-PARTICIPANT_VALIDATION_INTERVAL = int(os.environ.get("PARTICIPANT_VALIDATION_INTERVAL", "1800"))
+PARTICIPANT_VALIDATION_INTERVAL = int(os.environ.get("PARTICIPANT_VALIDATION_INTERVAL", "3600"))
 METRICS_CALCULATION_INTERVAL = int(os.environ.get("METRICS_CALCULATION_INTERVAL", "1800"))
 
 # Auth (owner API)
