@@ -7,7 +7,7 @@ Evaluation model (v2, spec-based pointwise):
 3. Extract script + voice traits from the miner's generated audio with the same pointwise call.
 4. Score each element (script, gender, pitch, speed, age_group, emotion, tone, accent) against the source spec, weight, and sum to a final score in [0, 1].
 
-Model: gpt-4o-audio-preview (or GPT_AUDIO_MODEL). OpenAI key only.
+Model: gpt-audio-1.5 (pinned via GPT_AUDIO_MODEL in vocence.domain.config). OpenAI key only.
 """
 
 import asyncio

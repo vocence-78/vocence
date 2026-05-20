@@ -24,7 +24,7 @@ from typing import Any
 CONFIG: dict[str, Any] = {
     # Required for OpenAI audio models
     "OPENAI_API_KEY": "sk-your-key-here",
-    "GPT_AUDIO_MODEL": "gpt-4o-audio-preview",
+    "GPT_AUDIO_MODEL": "gpt-audio-1.5",
     # Fingerprint test runs — API still costs money
     "DISABLE_CACHE": True,
     "TEMP_DIR": "temp_audio_judge_script",

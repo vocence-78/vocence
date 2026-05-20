@@ -93,8 +93,9 @@ HIPPIUS_SECRET_KEY = HIPPIUS_OWNER_SECRET_KEY
 
 # OpenAI configuration (OPENAI_AUTH_KEY or OPENAI_API_KEY from .env)
 OPENAI_AUTH_KEY = os.environ.get("OPENAI_AUTH_KEY") or os.environ.get("OPENAI_API_KEY")
-# Model for audio-in description and comparison (transcription + traits, first/second choice)
-GPT_AUDIO_MODEL = os.environ.get("GPT_AUDIO_MODEL", "gpt-4o-audio-preview")
+# Model for audio-in description and comparison (transcription + traits, first/second choice).
+# Hardcoded — must match across all honest validators for cross-validator scoring to converge.
+GPT_AUDIO_MODEL = "gpt-audio-1.5"
 
 # Audio generation placeholder model
 PLACEHOLDER_TTS_ENDPOINT = os.environ.get(
