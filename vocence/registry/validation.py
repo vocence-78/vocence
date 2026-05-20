@@ -609,7 +609,7 @@ def detect_duplicates(miners: List[ParticipantInfo]) -> List[ParticipantInfo]:
 # Fraction of per-tensor hashes that must match an earlier miner for the later one
 # to be marked a duplicate. Below 1.0 catches partial-copy attacks (clone most layers,
 # tweak a few); 1.0 alone would only catch exact clones with identical packaging.
-TENSOR_NEAR_CLONE_THRESHOLD = 0.85
+TENSOR_NEAR_CLONE_THRESHOLD = 0.95
 
 
 def _tensor_match_ratio(earlier: Dict[str, str], later: Dict[str, str]) -> float:

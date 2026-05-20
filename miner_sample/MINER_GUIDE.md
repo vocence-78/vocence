@@ -184,7 +184,7 @@ After all per-miner checks pass, the owner runs **two passes of duplicate detect
 - **`model_hash` byte-equality** — catches lazy copies where weight files are bit-for-bit identical. Failure reason: `duplicate_model:earliest_uid=<uid>`.
 - **Per-tensor fingerprint** — catches repackaging attacks that produce the same tensor values under different file layout (rename, re-shard, format conversion, non-LFS escape) plus partial-copy attacks where most layers are reused. Two thresholds:
   - 100% of tensors bit-identical → `tensor_clone_of:earliest_uid=<uid>`
-  - ≥85% of tensors bit-identical → `tensor_near_clone_of:earliest_uid=<uid>:ratio=<r>`
+  - ≥95% of tensors bit-identical → `tensor_near_clone_of:earliest_uid=<uid>:ratio=<r>`. This threshold is calibrated for LoRA-style fine-tuning of a shared base: standard LoRA recipes change 10–25% of tensors so honest independent fine-tunes typically match each other at 75–90% and pass cleanly. A cheater who clones an existing miner must modify at least ~5% of tensors to slip through, which materially degrades the model output.
 
 Checks 1–8 are the existing chute/HF/wrapper gates; **9–13 plus tensor-fingerprint dedup are the new model-pinning gates** described in section 4.
 
