@@ -12,7 +12,7 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import aiohttp
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, hf_hub_download
 
 from vocence.domain.config import (
     HF_AUTH_TOKEN,
@@ -30,6 +30,7 @@ from vocence.registry.wrapper_integrity import (
     extract_approved_variables,
     is_valid_hf_revision,
 )
+from vocence.registry.source_audit import verify_miner_source, verify_vocence_config
 
 # Chute name must contain this substring (case-insensitive) for owner validation to pass.
 # Checked against the chute name from Chutes API (e.g. vocence-parler-tts-010), not chute_id (UUID).
@@ -37,6 +38,11 @@ CHUTE_NAME_MAGIC_WORD = "vocence"
 
 # Weight file extensions for TTS models (include common formats)
 WEIGHT_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".onnx")
+
+# Repos with less than this much weight data are rejected. Real PromptTTS models are
+# easily tens-to-hundreds of MB; an empty / placeholder repo is almost always a sign
+# the miner is loading weights from somewhere else at runtime.
+MIN_REPO_WEIGHT_BYTES = 20 * 1024 * 1024  # 20 MiB
 
 # Cache for model hashes: (model, revision) -> ((hash, actual_revision), cached_at)
 _model_hash_cache: Dict[Tuple[str, str], Tuple[Optional[Tuple[str, str]], float]] = {}
@@ -104,6 +110,72 @@ async def _fetch_blacklist_from_api() -> set:
         except Exception as e:
             emit_log(f"Blacklist API request failed: {e}", "warn")
             return set()
+
+
+def _sum_lfs_bytes(siblings: List[Any]) -> int:
+    """Sum the LFS byte sizes of files in an HF repo's siblings list.
+
+    Anything HF stores via LFS is by definition large enough to be a real model
+    asset (~10 MiB+). A repo with very little (or no) LFS data is almost always
+    a placeholder pointing at someone else's model at runtime.
+    """
+    total = 0
+    for s in siblings:
+        lfs = getattr(s, "lfs", None)
+        if lfs is None:
+            continue
+        size = lfs.get("size") if isinstance(lfs, dict) else getattr(lfs, "size", None)
+        if size:
+            try:
+                total += int(size)
+            except (TypeError, ValueError):
+                continue
+    return total
+
+
+async def get_repo_lfs_bytes(model_id: str, revision: str) -> Optional[int]:
+    """Return the total LFS byte size across all files in an HF repo at a revision.
+
+    Used by the minimum-weight check. None on fetch failure.
+    """
+    def _fetch(token):
+        return HfApi(token=token).repo_info(
+            repo_id=model_id,
+            repo_type="model",
+            revision=revision,
+            files_metadata=True,
+        )
+    try:
+        info = await asyncio.to_thread(_fetch, HF_AUTH_TOKEN or None)
+    except Exception as e:
+        emit_log(f"repo_info failed for {model_id}@{revision} (lfs sum): {e}", "warn")
+        return None
+    return _sum_lfs_bytes(getattr(info, "siblings", None) or [])
+
+
+def _fetch_repo_text_file(model_id: str, revision: str, filename: str) -> Optional[str]:
+    """Fetch a single text file from an HF repo at a pinned revision.
+
+    Returns the file contents or None if the file is missing / fetch failed.
+    Used for the miner.py and vocence_config.yaml audits.
+    """
+    try:
+        path = hf_hub_download(
+            repo_id=model_id,
+            filename=filename,
+            revision=revision,
+            repo_type="model",
+            token=HF_AUTH_TOKEN or None,
+        )
+    except Exception as e:
+        emit_log(f"hf_hub_download failed for {model_id}@{revision}/{filename}: {e}", "warn")
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        emit_log(f"read failed for {model_id}@{revision}/{filename}: {e}", "warn")
+        return None
 
 
 async def get_model_fingerprint(model_id: str, revision: str) -> Optional[Tuple[str, str]]:
@@ -334,10 +406,51 @@ async def validate_miner(
         emit_log(f"uid {uid} ({hotkey[:12]}...): failed at revision_hf_match", "warn")
         return info
 
+    # Step 6: Minimum weight bytes — block empty/placeholder repos that exist only to
+    # point miner.py at someone else's model.
+    lfs_bytes = await get_repo_lfs_bytes(model_name, model_revision)
+    if lfs_bytes is None:
+        info.invalid_reason = "hf_lfs_size_fetch_failed"
+        emit_log(f"uid {uid} ({hotkey[:12]}...): failed at lfs_size_fetch", "warn")
+        return info
+    if lfs_bytes < MIN_REPO_WEIGHT_BYTES:
+        info.invalid_reason = f"repo_below_min_weight_bytes:{lfs_bytes}<{MIN_REPO_WEIGHT_BYTES}"
+        emit_log(
+            f"uid {uid} ({hotkey[:12]}...): failed at min_weight_bytes "
+            f"({lfs_bytes:,} < {MIN_REPO_WEIGHT_BYTES:,})",
+            "warn",
+        )
+        return info
+
+    # Step 7: vocence_config.yaml must declare model_id == model_name (= VOCENCE_REPO on chain).
+    yaml_text = await asyncio.to_thread(_fetch_repo_text_file, model_name, model_revision, "vocence_config.yaml")
+    if yaml_text is None:
+        info.invalid_reason = "vocence_config_fetch_failed"
+        emit_log(f"uid {uid} ({hotkey[:12]}...): failed at vocence_config_fetch", "warn")
+        return info
+    ok_yaml, yaml_reason = verify_vocence_config(yaml_text, model_name)
+    if not ok_yaml:
+        info.invalid_reason = yaml_reason or "vocence_config_invalid"
+        emit_log(f"uid {uid} ({hotkey[:12]}...): failed at vocence_config_audit ({yaml_reason})", "warn")
+        return info
+
+    # Step 8: miner.py source audit — must use from_pretrained(model_id), no external loaders.
+    miner_source = await asyncio.to_thread(_fetch_repo_text_file, model_name, model_revision, "miner.py")
+    if miner_source is None:
+        info.invalid_reason = "miner_py_fetch_failed"
+        emit_log(f"uid {uid} ({hotkey[:12]}...): failed at miner_py_fetch", "warn")
+        return info
+    ok_src, src_reason = verify_miner_source(miner_source)
+    if not ok_src:
+        info.invalid_reason = src_reason or "miner_py_invalid"
+        emit_log(f"uid {uid} ({hotkey[:12]}...): failed at miner_py_audit ({src_reason})", "warn")
+        return info
+
     info.is_valid = True
     emit_log(
         f"uid {uid} ({hotkey[:12]}...): passed chute_fetch, wrapper_integrity, chute_hot, "
-        f"wrapper_revision_match, wrapper_repo_match, model_fingerprint, revision_hf_match",
+        f"wrapper_revision_match, wrapper_repo_match, model_fingerprint, revision_hf_match, "
+        f"min_weight_bytes, vocence_config_audit, miner_py_audit",
         "success",
     )
     return info
