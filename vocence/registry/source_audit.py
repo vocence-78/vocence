@@ -33,7 +33,7 @@ _BANNED_IMPORT_PREFIXES: Tuple[str, ...] = (
 )
 
 # Variable name miner.py must use for the declared model.
-_MODEL_ID_VAR = "model_id"
+_MODEL_NAME_VAR = "model_name"
 
 
 def _call_dotted_name(call: ast.Call) -> str:
@@ -85,13 +85,13 @@ def verify_miner_source(source: str) -> Tuple[bool, str | None]:
                         if kw.arg == "pretrained_model_name_or_path":
                             arg = kw.value
                             break
-                if not isinstance(arg, ast.Name) or arg.id != _MODEL_ID_VAR:
-                    return False, "from_pretrained_must_use_model_id"
+                if not isinstance(arg, ast.Name) or arg.id != _MODEL_NAME_VAR:
+                    return False, "from_pretrained_must_use_model_name"
     return True, None
 
 
-def verify_vocence_config(yaml_text: str, expected_model_id: str) -> Tuple[bool, str | None]:
-    """Parse vocence_config.yaml and verify model_id matches the on-chain repo.
+def verify_vocence_config(yaml_text: str, expected_model_name: str) -> Tuple[bool, str | None]:
+    """Parse vocence_config.yaml and verify model_name matches the on-chain repo.
 
     Returns (True, None) if compliant, (False, reason) otherwise.
     """
@@ -103,9 +103,9 @@ def verify_vocence_config(yaml_text: str, expected_model_id: str) -> Tuple[bool,
         return False, f"vocence_config_parse_error:{e}"
     if not isinstance(cfg, dict):
         return False, "vocence_config_not_a_mapping"
-    declared = str(cfg.get("model_id") or "").strip()
+    declared = str(cfg.get("model_name") or "").strip()
     if not declared:
-        return False, "vocence_config_missing_model_id"
-    if declared != expected_model_id:
-        return False, f"model_id_mismatch:yaml={declared}"
+        return False, "vocence_config_missing_model_name"
+    if declared != expected_model_name:
+        return False, f"model_name_mismatch:yaml={declared}"
     return True, None

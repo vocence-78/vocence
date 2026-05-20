@@ -320,8 +320,8 @@ async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArt
 
     Steps:
       1. .safetensors files present and totaling >= MIN_SAFETENSORS_BYTES
-      2. vocence_config.yaml declares model_id == model
-      3. miner.py source audit (from_pretrained(model_id), no banned calls/imports)
+      2. vocence_config.yaml declares model_name == on-chain model_name
+      3. miner.py source audit (from_pretrained(model_name), no banned calls/imports)
       4. tensor fingerprint computed and persisted to repo_tensor_fingerprints
 
     Returns None on transient HF errors so the caller can retry on the next cycle.

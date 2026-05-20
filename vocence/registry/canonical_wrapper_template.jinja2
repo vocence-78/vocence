@@ -151,7 +151,7 @@ def vocence_apply_config(cls: type, config: dict):
     return obj
 
 
-# --- Miner source audit: enforce model_id contract, no external fetches ---
+# --- Miner source audit: enforce model_name contract, no external fetches ---
 # Last-component names that are forbidden anywhere in miner.py. `pipeline`,
 # `snapshot_download`, etc. all pull weights from outside the declared repo;
 # `eval`/`exec`/`__import__`/`import_module` defeat any static check.
@@ -175,7 +175,7 @@ VOCENCE_BANNED_IMPORT_PREFIXES = (
 )
 
 # The single variable name miner.py must use to refer to the declared model.
-VOCENCE_MODEL_ID_VAR = "model_id"
+VOCENCE_MODEL_NAME_VAR = "model_name"
 
 
 def vocence_call_dotted_name(call: ast.Call) -> str:
@@ -199,9 +199,9 @@ def vocence_verify_miner_source(source: str) -> None:
     """Static AST check of miner.py before we exec it.
 
     Rules (hash-locked into the canonical wrapper):
-    1. Every `from_pretrained` call must take `model_id` as its first positional
+    1. Every `from_pretrained` call must take `model_name` as its first positional
        arg (or as the `pretrained_model_name_or_path` keyword). String literals,
-       other variables, or expressions like `model_id + "x"` are rejected.
+       other variables, or expressions like `model_name + "x"` are rejected.
     2. Calls to other model-loading or dynamic-execution primitives are banned
        outright (snapshot_download, hf_hub_download, cached_download, pipeline,
        torch.hub.load, eval, exec, compile, __import__, import_module).
@@ -236,10 +236,10 @@ def vocence_verify_miner_source(source: str) -> None:
                         if kw.arg == "pretrained_model_name_or_path":
                             arg = kw.value
                             break
-                if not isinstance(arg, ast.Name) or arg.id != VOCENCE_MODEL_ID_VAR:
+                if not isinstance(arg, ast.Name) or arg.id != VOCENCE_MODEL_NAME_VAR:
                     raise RuntimeError(
                         f"miner.py: from_pretrained() must be called with bare "
-                        f"`{VOCENCE_MODEL_ID_VAR}` as its first arg (no string "
+                        f"`{VOCENCE_MODEL_NAME_VAR}` as its first arg (no string "
                         f"literals, no expressions)"
                     )
 
@@ -346,19 +346,19 @@ async def vocence_startup(self) -> None:
         repo_path = Path(snapshot_download(VOCENCE_REPO, revision=VOCENCE_REVISION))
         print("✅ Vocence repo downloaded (runtime)")
 
-        # vocence_config.yaml is mandatory and must declare model_id == VOCENCE_REPO.
+        # vocence_config.yaml is mandatory and must declare model_name == VOCENCE_REPO.
         # This ties the on-chain commitment to the runtime engine: the only way for
-        # miner.py to load weights is from_pretrained(model_id), and model_id has
+        # miner.py to load weights is from_pretrained(model_name), and model_name has
         # to match what was committed on chain.
         vocence_yaml = repo_path / "vocence_config.yaml"
         if not vocence_yaml.exists():
             raise RuntimeError("vocence_config.yaml missing from repo")
         with vocence_yaml.open() as f:
             cfg = safe_load(f) or {}
-        declared_model_id = str(cfg.get("model_id") or "").strip()
-        if declared_model_id != VOCENCE_REPO:
+        declared_model_name = str(cfg.get("model_name") or "").strip()
+        if declared_model_name != VOCENCE_REPO:
             raise RuntimeError(
-                f"vocence_config.yaml model_id ({declared_model_id!r}) does not "
+                f"vocence_config.yaml model_name ({declared_model_name!r}) does not "
                 f"match VOCENCE_REPO ({VOCENCE_REPO!r})"
             )
 

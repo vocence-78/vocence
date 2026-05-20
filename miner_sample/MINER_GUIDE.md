@@ -19,7 +19,7 @@ Your HF repo must include:
 |------|----------|-------------|
 | `miner.py` | Yes | PromptTTS engine: class `Miner`, `__init__(path_hf_repo: Path)`, `warmup()`, `generate_wav(instruction, text)` → `(waveform, sample_rate)`. |
 | `chute_config.yml` | Yes | Image (base, pip), NodeSelector (GPU), Chute (tagline, scaling). Used at build time. |
-| `vocence_config.yaml` | Yes | **Must declare `model_id` matching the `model_name` you committed on chain** (see section 4). May also carry runtime/generation options read by your engine. |
+| `vocence_config.yaml` | Yes | **Must declare `model_name` matching what you committed on chain** (see section 4). May also carry runtime/generation options read by your engine. |
 | `*.safetensors` weight files | Yes | Weights MUST be shipped as `.safetensors`. The combined size of all `.safetensors` files must be at least **50 MiB**. Pickle-format weights (`.bin`/`.pt`/`.pth`/`.ckpt`) are not accepted. |
 
 All engine logic must live in `miner.py`; only stdlib and site-packages may be imported (no other repo files). See **section 4** for the exact rules on what `miner.py` is allowed to do.
@@ -32,7 +32,7 @@ All engine logic must live in `miner.py`; only stdlib and site-packages may be i
 - **warmup()** — Optional; one short `generate_wav` so the first request does not time out.
 - **generate_wav(instruction: str, text: str) -> tuple[np.ndarray, int]** — Return mono float32 PCM and sample rate.
 
-The wrapper has already downloaded your repo and the HF cache is populated before your `__init__` runs, so `from_pretrained(model_id)` resolves from disk without hitting the network.
+The wrapper has already downloaded your repo and the HF cache is populated before your `__init__` runs, so `from_pretrained(model_name)` resolves from disk without hitting the network.
 
 ---
 
@@ -40,30 +40,32 @@ The wrapper has already downloaded your repo and the HF cache is populated befor
 
 These rules are enforced **twice**: owner-side at registration (early rejection) and at chute startup by the canonical wrapper (hash-locked, can't be bypassed). They constrain **how** you load your model, not **what** your model is — every miner ships their own unique `miner.py`, with their own architecture, sampling, post-processing, and any other engine code they want.
 
-**Naming.** The same HF repo ID appears under three different names across the system; **all three must hold the same value** and the owner-side audit verifies it:
+**Naming.** The HF repo ID is called `model_name` everywhere a miner directly interacts with it (matching the `--model-name` CLI flag), and is rendered as `VOCENCE_REPO` inside the canonical wrapper template:
 
 | Where | Field name |
 |---|---|
 | On chain (your commitment JSON) | `model_name` |
-| In `vocence_config.yaml` | `model_id` |
+| CLI flag for `vocence miner push` / `commit` | `--model-name` |
+| In `vocence_config.yaml` | `model_name` |
+| Required variable name in `miner.py` | `model_name` |
 | In the rendered canonical wrapper | `VOCENCE_REPO` |
 
-When the docs say "your committed HF repo ID" they mean this single value, regardless of which name happens to apply at that layer.
+All five must hold the same value. The audit verifies it.
 
-### 4a. `vocence_config.yaml` must declare `model_id`
+### 4a. `vocence_config.yaml` must declare `model_name`
 
-The file must contain a top-level `model_id` field whose value equals the HF repo ID you committed on chain (the `model_name` field in your commitment JSON):
+The file must contain a top-level `model_name` field whose value equals what you committed on chain:
 
 ```yaml
-model_id: "your-hf-user/your-repo-name"
+model_name: "your-hf-user/your-repo-name"
 # ... your other runtime/generation settings below
 ```
 
-If `model_id` is missing, malformed, or doesn't match the on-chain `model_name`, the chute refuses to start and the owner marks the miner invalid (`model_id_mismatch:yaml=...`).
+If `model_name` is missing, malformed, or doesn't match the on-chain commitment, the chute refuses to start and the owner marks the miner invalid (`model_name_mismatch:yaml=...`).
 
-### 4b. `from_pretrained` must use the `model_id` variable
+### 4b. `from_pretrained` must use the `model_name` variable
 
-Every call to `from_pretrained` in `miner.py` must take the bare `model_id` variable as its first positional argument (or as the `pretrained_model_name_or_path` keyword). No string literals, no other variables, no expressions like `model_id + "-large"`.
+Every call to `from_pretrained` in `miner.py` must take the bare `model_name` variable as its first positional argument (or as the `pretrained_model_name_or_path` keyword). No string literals, no other variables, no expressions like `model_name + "-large"`.
 
 ✅ Allowed:
 ```python
@@ -73,18 +75,18 @@ from transformers import AutoModel, AutoProcessor, AutoTokenizer
 class Miner:
     def __init__(self, repo_path):
         cfg = yaml.safe_load((repo_path / "vocence_config.yaml").open())
-        model_id = cfg["model_id"]
-        self.tok       = AutoTokenizer.from_pretrained(model_id)
-        self.processor = AutoProcessor.from_pretrained(model_id)
-        self.model     = AutoModel.from_pretrained(model_id)
+        model_name = cfg["model_name"]
+        self.tok       = AutoTokenizer.from_pretrained(model_name)
+        self.processor = AutoProcessor.from_pretrained(model_name)
+        self.model     = AutoModel.from_pretrained(model_name)
         # Subfolders within your own repo are fine:
-        self.vocoder   = AutoModel.from_pretrained(model_id, subfolder="vocoder")
+        self.vocoder   = AutoModel.from_pretrained(model_name, subfolder="vocoder")
 ```
 
 ❌ Rejected:
 ```python
 self.m = AutoModel.from_pretrained("other-user/their-model")   # hardcoded string
-self.m = AutoModel.from_pretrained(model_id + "-large")        # expression
+self.m = AutoModel.from_pretrained(model_name + "-large")      # expression
 self.m = AutoModel.from_pretrained(some_other_var)             # wrong variable
 ```
 
@@ -126,7 +128,7 @@ The rules above are the entire surface. Within them, you choose:
 - Training data, fine-tuning, weight precision.
 - Inference logic: sampling strategy, beam search, classifier-free guidance, your own scheduler.
 - Pre- and post-processing: text normalization, prosody tagging, waveform filtering, loudness normalization.
-- Multiple sub-models loaded via `from_pretrained(model_id, subfolder=...)` for things like vocoder + acoustic model + tokenizer.
+- Multiple sub-models loaded via `from_pretrained(model_name, subfolder=...)` for things like vocoder + acoustic model + tokenizer.
 - Additional files in your repo: `torch.load(...)` voice embeddings, JSON configs, lookup tables, etc.
 
 Two miners with two completely different `miner.py` files both pass as long as they follow 4a–4d.
@@ -146,7 +148,7 @@ The canonical wrapper is generated from the template in `chute_template/`. You m
 
 All other wrapper code is fixed. Changing anything else causes **wrapper integrity** to fail (see below).
 
-`VOCENCE_REPO` is the wrapper's rendered copy of the same HF repo ID you commit on chain as `model_name` and declare in `vocence_config.yaml` as `model_id` — see the naming table at the top of section 4. All three must match.
+`VOCENCE_REPO` is the wrapper's rendered copy of the same `model_name` you commit on chain and declare in `vocence_config.yaml` — see the naming table at the top of section 4. Both must match.
 
 ---
 
@@ -184,8 +186,8 @@ Validation runs on a **1-hour cycle**. Each new `(model, revision)` is audited o
 | 8 | HF model fingerprint is computable | `hf_model_fetch_failed` |
 | 9 | Repo contains `.safetensors` files | `safetensors_missing` |
 | 10 | Combined size of `.safetensors` files ≥ **50 MiB** | `safetensors_below_min_size:<actual><threshold>` |
-| 11 | `vocence_config.yaml` exists and its `model_id` equals the on-chain `model_name` | `vocence_config_missing` / `vocence_config_missing_model_id` / `model_id_mismatch:yaml=...` |
-| 12 | `miner.py` passes the source audit (section 4) | `miner_py_missing` / `banned_call:...` / `banned_import:...` / `from_pretrained_must_use_model_id` |
+| 11 | `vocence_config.yaml` exists and its `model_name` equals the on-chain `model_name` | `vocence_config_missing` / `vocence_config_missing_model_name` / `model_name_mismatch:yaml=...` |
+| 12 | `miner.py` passes the source audit (section 4) | `miner_py_missing` / `banned_call:...` / `banned_import:...` / `from_pretrained_must_use_model_name` |
 | 13 | Per-tensor fingerprint computed and persisted to `repo_tensor_fingerprints` | `tensor_fingerprint_failed` |
 
 After all per-miner checks pass, the owner runs **two passes of duplicate detection** across miners. The rule is the same in both passes: earliest commit block keeps `is_valid = True`, later miners flip to invalid.
@@ -207,7 +209,7 @@ Two enforcement levels apply. Read this section before deploying. **The owner re
 
 The checks in section 7 run **every 1 hour**. Any failure sets `is_valid = False` for your hotkey, which means validators give you zero scoring weight. You stay registered and can recover by fixing the issue and committing a new revision on chain — the next validation cycle picks up the change.
 
-This is the soft path. It catches honest mistakes (forgot `vocence_config.yaml`, wrong `model_id`, banned import in `miner.py`, repo under 50 MiB, etc.) and lets you fix and try again.
+This is the soft path. It catches honest mistakes (forgot `vocence_config.yaml`, wrong `model_name`, banned import in `miner.py`, repo under 50 MiB, etc.) and lets you fix and try again.
 
 ### 8b. Manual blacklist (NOT recoverable)
 
@@ -217,8 +219,8 @@ The following behaviors will get your hotkey blacklisted:
 
 #### A. Wrapper or `miner.py` tampering
 - Deploying a chute whose wrapper differs from the canonical template in any way other than the four approved variables.
-- `miner.py` that loads weights from a repo other than your declared `model_id`. This includes side-channel network calls, runtime monkey-patching of `from_pretrained`, or any code path that fetches model data from outside your declared repo.
-- Attempting to bypass the wrapper's `model_id == VOCENCE_REPO` check or its `miner.py` source audit.
+- `miner.py` that loads weights from a repo other than your declared `model_name`. This includes side-channel network calls, runtime monkey-patching of `from_pretrained`, or any code path that fetches model data from outside your declared repo.
+- Attempting to bypass the wrapper's `model_name == VOCENCE_REPO` check or its `miner.py` source audit.
 
 #### B. Model identity gaming
 - **Copying another miner's weights, in any form, will get you blacklisted.** This includes: byte-identical clones, repackaged weights (rename/re-shard/format conversion), ε-noise perturbations, precision roundtrips, dtype conversion, partial-layer replacement, and any other technique whose end result is "this miner is shipping someone else's model with cosmetic changes."

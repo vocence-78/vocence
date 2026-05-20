@@ -7,8 +7,8 @@ Contract: this file must be named miner.py and define class Miner with
   - generate_wav(instruction: str, text: str) -> tuple[np.ndarray, int]
 
 Loading rule (enforced by the canonical wrapper, hash-locked):
-  - Read model_id from vocence_config.yaml; it must equal your committed VOCENCE_REPO.
-  - Call from_pretrained(model_id) — bare variable only, no string literals.
+  - Read model_name from vocence_config.yaml; it must equal what you committed on chain.
+  - Call from_pretrained(model_name) — bare variable only, no string literals.
   - No snapshot_download / hf_hub_download / pipeline / torch.hub.load / requests / etc.
 """
 from __future__ import annotations
@@ -26,14 +26,14 @@ class Miner:
         self._repo_path = Path(path_hf_repo).resolve()
         with (self._repo_path / "vocence_config.yaml").open() as f:
             self._config = yaml.safe_load(f) or {}
-        model_id = self._config["model_id"]
+        model_name = self._config["model_name"]
         # Real miners would load their model here, e.g.:
         #   from transformers import AutoModel, AutoProcessor
-        #   self.processor = AutoProcessor.from_pretrained(model_id)
-        #   self.model = AutoModel.from_pretrained(model_id)
-        # The wrapper has already snapshot-downloaded model_id into the HF cache,
+        #   self.processor = AutoProcessor.from_pretrained(model_name)
+        #   self.model = AutoModel.from_pretrained(model_name)
+        # The wrapper has already snapshot-downloaded model_name into the HF cache,
         # so from_pretrained loads from disk without hitting the network.
-        self._model_id = model_id
+        self._model_name = model_name
 
     def warmup(self) -> None:
         _ = self.generate_wav(instruction="neutral voice", text="warmup")
