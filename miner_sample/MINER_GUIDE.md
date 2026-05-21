@@ -127,7 +127,7 @@ The rules above are the entire surface. Within them, you choose:
 - Model architecture (Parler-TTS, XTTS, Tortoise, your own transformer, anything).
 - Training data, fine-tuning, weight precision.
 - Inference logic: sampling strategy, beam search, classifier-free guidance, your own scheduler.
-- Pre- and post-processing: text normalization, prosody tagging, waveform filtering, loudness normalization.
+- Pre- and post-processing: text normalization, number expansion, SSML markers, prompt enrichment (rewriting / expanding the `instruction` or `text` before feeding your model), prosody tagging, waveform filtering, loudness normalization. The judge scores your audio against the validator's original spec, so enrichment that helps your model match better is just good engineering.
 - Multiple sub-models loaded via `from_pretrained(model_name, subfolder=...)` for things like vocoder + acoustic model + tokenizer.
 - Additional files in your repo: `torch.load(...)` voice embeddings, JSON configs, lookup tables, etc.
 
@@ -204,6 +204,37 @@ Checks 1–8 are the existing chute/HF/wrapper gates; **9–13 plus tensor-finge
 ## 8. Prohibited conduct — what gets you rejected or blacklisted
 
 Two enforcement levels apply. Read this section before deploying. **The owner reserves the right to blacklist any hotkey based on observed behavior; the list below is not exhaustive.**
+
+### At-a-glance: everything that's disallowed
+
+| Action | Consequence |
+|---|---|
+| Ship weights as anything other than `.safetensors` (no `.bin`/`.pt`/`.pth`/`.ckpt` etc.) | Auto-reject (`safetensors_missing`) |
+| Combined `.safetensors` size under **50 MiB** | Auto-reject (`safetensors_below_min_size`) |
+| Missing or wrong `model_name` in `vocence_config.yaml` | Auto-reject (`vocence_config_missing_model_name` / `model_name_mismatch:yaml=...`) |
+| `model_revision` is a branch name / tag / `latest` instead of a 40-char hex SHA | Auto-reject (`wrapper_revision_not_sha`) → **blacklist** if repeated |
+| More than **2 valid on-chain commits** with one hotkey after block **8081000** | Auto-reject (`too_many_commits`) → **blacklist** if repeated |
+| `miner.py` calls any banned function — `snapshot_download`, `hf_hub_download`, `cached_download`, `pipeline`, `torch.hub.load`, `eval`, `exec`, `compile`, `__import__`, `import_module` | Auto-reject (`banned_call:...`) |
+| `miner.py` imports any banned module — `requests`, `urllib*`, `httpx`, `aiohttp`, `socket`, `huggingface_hub`, `importlib`, `torch.hub` | Auto-reject (`banned_import:...`) |
+| `from_pretrained` called with anything other than the bare `model_name` variable (no string literals, no expressions, no other variables) | Auto-reject (`from_pretrained_must_use_model_name`) |
+| Modify the canonical wrapper beyond the 4 approved template variables | Auto-reject (`wrapper_hash_mismatch`) |
+| Chute name (Chutes-side) missing the substring `vocence` | Auto-reject (`chute_name_missing_vocence`) |
+| Chute not hot, repo or revision missing on Hugging Face | Auto-reject |
+| Model byte-identical to an earlier miner (same `model_hash`) | Auto-reject (`duplicate_model:earliest_uid=<n>`) — later commit loses |
+| Per-tensor fingerprint matches an earlier miner at ≥95% | Auto-reject (`tensor_clone_of` / `tensor_near_clone_of`) — later commit loses |
+| **Copying another miner's weights in any form** — byte clone, repackage, rename/re-shard, format conversion, ε-noise, precision roundtrip, dtype conversion, partial-layer replacement | **Blacklist** |
+| Registering multiple hotkeys serving the same effective model (Sybil) | **Blacklist** |
+| Repeated attempts to land near-misses just below the 95% dedup threshold | **Blacklist** |
+| Proxying `/speak` to another chute, returning pre-recorded audio, replaying cached outputs | **Blacklist** |
+| Returning audio that doesn't match the requested `text` or doesn't reflect the requested traits | **Blacklist** |
+| Serving different quality to different validator UIDs to game variance | **Blacklist** |
+| Loading weights at runtime from any repo other than your declared `model_name` (monkey-patching, side-channel HTTP, etc.) | **Blacklist** |
+| Bypassing the wrapper's `model_name == VOCENCE_REPO` check or the `miner.py` source audit | **Blacklist** |
+| Pattern of commits whose only apparent purpose is probing the validation surface | **Blacklist** |
+| Coordinating across multiple hotkeys you control | **Blacklist** |
+| **Any form of cheating not listed above** — if it looks like gaming, it gets you blacklisted | **Blacklist** |
+
+**Auto-reject** = `is_valid = False` until you fix and re-commit (recoverable). **Blacklist** = hotkey appended to `/blocklist/participants`; every future commit from that hotkey is permanently excluded (NOT recoverable). The detailed rules and the rejection / blacklist mechanics are in 8a–8d below.
 
 ### 8a. Automatic rejection (recoverable)
 
