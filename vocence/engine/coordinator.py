@@ -12,6 +12,7 @@ Architecture:
 """
 
 import asyncio
+import time
 from typing import Dict, Any, List
 
 import bittensor as bt
@@ -572,18 +573,59 @@ async def main() -> None:
             await _reconnect_subtensor(subtensor_ref)
             raise
 
-    generator_task = asyncio.create_task(
-        generate_samples_continuously(corpus_client, validator_client, openai_client, get_block_with_timeout)
-    )
+    async def run_generator_supervised() -> None:
+        """Run generate_samples_continuously in a supervised loop.
+
+        A bare `asyncio.create_task(generate_samples_continuously(...))` would
+        permanently disable sample generation if any uncaught exception escaped
+        the inner round loop (bucket setup, block waiter, etc.). This wrapper
+        restarts the generator on failure with exponential backoff (12s → 300s
+        cap) and resets the backoff after the generator runs cleanly for at
+        least 60s, so a one-off crash doesn't drag the next restart out.
+        """
+        backoff_initial = 12.0
+        backoff_max = 300.0
+        healthy_reset_threshold = 60.0
+        backoff = backoff_initial
+        import traceback as _tb
+        while True:
+            start_time = time.time()
+            try:
+                await generate_samples_continuously(
+                    corpus_client, validator_client, openai_client, get_block_with_timeout,
+                )
+                # generate_samples_continuously is an infinite loop — returning is unexpected.
+                emit_log(
+                    "Background generator returned without error (unexpected); supervisor exiting",
+                    "warn",
+                )
+                return
+            except asyncio.CancelledError:
+                emit_log("Background generator cancelled", "warn")
+                raise
+            except Exception as e:
+                uptime = time.time() - start_time
+                if uptime >= healthy_reset_threshold:
+                    backoff = backoff_initial
+                emit_log(
+                    f"Background generator crashed after {uptime:.0f}s: {e}. "
+                    f"Restarting in {backoff:.0f}s...",
+                    "error",
+                )
+                _tb.print_exc()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, backoff_max)
+
+    generator_task = asyncio.create_task(run_generator_supervised())
 
     def handle_generator_exception(task: asyncio.Task) -> None:
-        """Handle exceptions from the background generator task."""
+        """Surface unexpected exits from the supervisor itself (it should run forever)."""
         try:
             exc = task.exception()
             if exc is not None:
-                emit_log(f"Background generator task failed: {exc}", "error")
+                emit_log(f"Generator supervisor exited with exception: {exc}", "error")
         except asyncio.CancelledError:
-            emit_log("Background generator task was cancelled", "warn")
+            emit_log("Generator supervisor was cancelled", "warn")
 
     generator_task.add_done_callback(handle_generator_exception)
 

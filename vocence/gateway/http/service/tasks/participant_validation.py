@@ -70,7 +70,10 @@ class ParticipantValidationTask:
         """Validate all participants from metagraph."""
         print_header("Participant Validation Sync")
         emit_log(
-            "Owner checks per miner: chute_fetch, wrapper_integrity (deploy script hash vs canonical), chute_hot, revision_chute_match, model_fingerprint, revision_hf_match",
+            "Owner checks per miner: chute_fetch, chute_name_vocence, wrapper_integrity, chute_hot, "
+            "wrapper_revision_match, wrapper_repo_match, repo_audit (safetensors + vocence_config "
+            "+ miner.py + tensor fingerprint with DB collision check); then model_hash and tensor "
+            "fingerprint duplicate detection across miners",
             "info",
         )
 

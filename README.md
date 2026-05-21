@@ -77,7 +77,7 @@ Vocence integrates with other Bittensor infrastructure, including:
 **Miners need:**
 
 - **Chutes:** A Chutes account; you deploy your chute with `chutes build` / `chutes deploy` (see miner_sample). Your **chute name/ID must contain "vocence"** (any position) for owner validation. No extra API key needed for deployment; validators use their own key to call you.
-- **Hugging Face:** A repo with your voice model engine (`miner.py`, PromptTTS in Q1), `chute_config.yml`, and optionally `vocence_config.yaml`; you render the canonical template with `VOCENCE_REPO`, `VOCENCE_REVISION`, `VOCENCE_CHUTES_USER`, `VOCENCE_CHUTE_ID`.
+- **Hugging Face:** A repo with your voice model engine (`miner.py`, PromptTTS in Q1), `chute_config.yml`, and `vocence_config.yaml` (must declare `model_name` matching what you commit on chain); you render the canonical template with `VOCENCE_REPO`, `VOCENCE_REVISION`, `VOCENCE_CHUTES_USER`, `VOCENCE_CHUTE_ID`. See [miner_sample/MINER_GUIDE.md](miner_sample/MINER_GUIDE.md) for the full ruleset.
 - **Bittensor:** Wallet (coldkey + hotkey) to register/commit on the subnet once your chute is live.
 
 ---

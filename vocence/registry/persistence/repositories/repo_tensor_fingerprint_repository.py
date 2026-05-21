@@ -104,27 +104,29 @@ class RepoTensorFingerprintRepository:
         and rows with empty tensor dicts are skipped.
 
         Returns (matched_model_name, matched_revision, ratio) on the first match, or
-        None if no collision.
+        None if there was no match and the scan completed cleanly.
+
+        **Fail-closed:** if the DB query itself errors out, the exception is re-raised
+        so the caller can treat the audit as inconclusive and retry. We do NOT swallow
+        the error and return None, since that would let a colliding commit pass the
+        collision check just because the DB was momentarily unreachable.
         """
         if not new_tensors:
             return None
-        try:
-            async with acquire_session() as session:
-                result = await session.execute(select(RepoTensorFingerprint))
-                for row in result.scalars():
-                    key = (row.model_name, row.model_revision)
-                    if key == exclude_key:
-                        continue
-                    try:
-                        existing = json.loads(row.tensors) or {}
-                    except json.JSONDecodeError:
-                        continue
-                    if not existing:
-                        continue
-                    matching = sum(1 for k, v in new_tensors.items() if existing.get(k) == v)
-                    ratio = matching / len(new_tensors)
-                    if ratio >= threshold:
-                        return (row.model_name, row.model_revision, ratio)
-        except Exception as e:
-            emit_log(f"find_collision query failed: {e}", "warn")
+        async with acquire_session() as session:
+            result = await session.execute(select(RepoTensorFingerprint))
+            for row in result.scalars():
+                key = (row.model_name, row.model_revision)
+                if key == exclude_key:
+                    continue
+                try:
+                    existing = json.loads(row.tensors) or {}
+                except json.JSONDecodeError:
+                    continue
+                if not existing:
+                    continue
+                matching = sum(1 for k, v in new_tensors.items() if existing.get(k) == v)
+                ratio = matching / len(new_tensors)
+                if ratio >= threshold:
+                    return (row.model_name, row.model_revision, ratio)
         return None

@@ -16,6 +16,7 @@ from typing import Optional
 from sqlalchemy import (
     String,
     Integer,
+    BigInteger,
     Float,
     Boolean,
     Text,
@@ -229,7 +230,8 @@ class RepoTensorFingerprint(BaseModel):
 
     model_name: Mapped[str] = mapped_column(String(255), primary_key=True)
     model_revision: Mapped[str] = mapped_column(String(64), primary_key=True)
-    total_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # BigInteger so multi-GB models (e.g., Parler-large ~2.3 GB) don't overflow Int32.
+    total_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     tensor_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # JSON object: {tensor_name: sha256_hex}. See fingerprint_safetensors_file.
     tensors: Mapped[str] = mapped_column(Text, nullable=False)
