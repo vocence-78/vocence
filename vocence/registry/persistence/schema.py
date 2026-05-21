@@ -215,6 +215,37 @@ class LiveEvaluationPending(BaseModel):
         return f"<LiveEvaluationPending(validator='{self.validator_hotkey[:8]}...', eval='{self.evaluation_id}')>"
 
 
+class RepoTensorFingerprint(BaseModel):
+    """Per-tensor SHA-256 hashes for an HF repo at a pinned revision.
+
+    Immutable per (model_name, model_revision) — HF commit shas don't change. Used by
+    detect_tensor_duplicates to find miners shipping the same tensor values under
+    different packaging (renamed files, re-sharding, format conversion, non-LFS).
+
+    Audit cost (download + hash) is paid exactly once per unique commit and cached
+    here forever; later validation cycles only need a primary-key lookup.
+    """
+    __tablename__ = "repo_tensor_fingerprints"
+
+    model_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    model_revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    total_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tensor_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # JSON object: {tensor_name: sha256_hex}. See fingerprint_safetensors_file.
+    tensors: Mapped[str] = mapped_column(Text, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<RepoTensorFingerprint({self.model_name}@{self.model_revision[:8]}, "
+            f"tensors={self.tensor_count}, bytes={self.total_bytes})>"
+        )
+
+
 class GlobalScoringSnapshot(BaseModel):
     """Persisted global scoring snapshot for dashboard rendering."""
 

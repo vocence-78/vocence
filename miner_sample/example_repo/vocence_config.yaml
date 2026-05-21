@@ -1,4 +1,8 @@
-# Optional PromptTTS settings read by your miner.py. Example values.
+# PromptTTS settings read by the canonical wrapper and your miner.py.
+# model_name MUST equal the value you commit on chain (and the rendered VOCENCE_REPO
+# in the wrapper). The wrapper refuses to start otherwise. miner.py must load weights
+# via from_pretrained(model_name).
+model_name: "your-hf-user/your-repo-name"
 
 runtime:
   adapter: "example"

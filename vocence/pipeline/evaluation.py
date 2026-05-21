@@ -7,7 +7,7 @@ Evaluation model (v2, spec-based pointwise):
 3. Extract script + voice traits from the miner's generated audio with the same pointwise call.
 4. Score each element (script, gender, pitch, speed, age_group, emotion, tone, accent) against the source spec, weight, and sum to a final score in [0, 1].
 
-Model: gpt-4o-audio-preview (or GPT_AUDIO_MODEL). OpenAI key only.
+Model: gpt-audio-1.5 (pinned via GPT_AUDIO_MODEL in vocence.domain.config). OpenAI key only.
 """
 
 import asyncio
@@ -69,6 +69,9 @@ _FALLBACK_TRAITS: Dict[str, str] = {
     "emotion":   "neutral",
     "tone":      "casual",
     "accent":    "neutral",
+    # Natural-language instruction (source-side only). Empty string when not provided —
+    # callers fall back to the deterministic structured form for prompt building.
+    "instruction": "",
 }
 
 # Legacy / alias values we silently coerce to the new closed enums so old metadata
@@ -104,6 +107,36 @@ Example:
 {"transcription": "hello world", "gender": "male", "pitch": "mid", "speed": "normal", "age_group": "adult", "emotion": "neutral", "tone": "casual", "accent": "us"}"""
 
 
+# Source-side prompt: same structured fields as above PLUS a natural-language instruction.
+# The structured fields drive scoring (closed enums, deterministic comparison). The
+# natural-language instruction is what we send to miners as the /speak `instruction` field
+# — varied phrasing per source audio simulates real-world user prompts and prevents miners
+# from overfitting to the deterministic "key: value | key: value" form.
+SOURCE_DESCRIPTION_SYSTEM = """You are an expert at analyzing speech for text-to-speech evaluation.
+Analyze the audio and return a JSON object with these exact keys. For each categorical trait you MUST pick exactly one value from the listed options.
+
+- transcription: the exact words spoken, lowercased, punctuation preserved (string)
+- gender: one of [male, female, neutral]
+- pitch: one of [low, mid, high]
+- speed: one of [slow, normal, fast]
+- age_group: one of [child, young_adult, adult, senior]
+- emotion: one of [neutral, happy, sad, angry, calm, excited, serious, fearful]
+- tone: one of [warm, cold, friendly, formal, casual, authoritative]
+- accent: one of [us, uk, au, in, neutral, other]
+- instruction: a single-sentence natural-language voice prompt of the kind a real user would write for a TTS system. You MUST describe ALL SEVEN voice dimensions — gender, age_group, accent, emotion, tone, speed, AND pitch — in natural words (NOT a key:value list). Vary phrasing and word order across audios so the instruction reads like genuine user input, not a template. Do NOT include the transcription text. The instruction must be self-contained enough that a reader can infer all seven categorical traits without seeing the structured fields.
+
+Return ONLY valid JSON, no markdown, no commentary. Every categorical value must be one of the listed options exactly as written.
+
+Examples of acceptable instruction phrasings (each covers all 7 dimensions):
+- "A cheerful, friendly young adult female speaker with a British accent, talking quickly in a high-pitched voice and a warm tone"
+- "A calm middle-aged American man with a formal authoritative tone, speaking slowly in a deep low-pitched voice"
+- "An excited senior woman, casual and friendly, talking fast in a moderately mid-pitched voice with an Australian accent"
+- "Serious child speaker, neutral American accent, mid-pitched voice, normal speaking pace, cold detached tone"
+
+Example response:
+{"transcription": "hello world", "gender": "female", "pitch": "high", "speed": "fast", "age_group": "young_adult", "emotion": "happy", "tone": "friendly", "accent": "uk", "instruction": "A cheerful, friendly young adult female speaker with a British accent, talking quickly in a high-pitched voice and a warm tone"}"""
+
+
 # ---------------------------------------------------------------------------
 # Trait extraction (pointwise): single audio -> transcription + traits
 # ---------------------------------------------------------------------------
@@ -125,7 +158,11 @@ def _normalize_trait_value(key: str, value: Any) -> str:
 
 
 def _parse_traits_response(text: str) -> Dict[str, Any]:
-    """Parse JSON from pointwise response; coerce every trait to its closed enum."""
+    """Parse JSON from pointwise response; coerce every trait to its closed enum.
+
+    Also extracts the optional `instruction` field (natural-language voice description,
+    only returned by the source-side prompt). Empty string when absent.
+    """
     raw = (text or "").strip()
     if "```" in raw:
         for part in raw.split("```"):
@@ -144,16 +181,23 @@ def _parse_traits_response(text: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {"transcription": str(parsed.get("transcription") or "").strip()}
     for key in VOICE_TRAIT_ENUMS:
         out[key] = _normalize_trait_value(key, parsed.get(key))
+    out["instruction"] = str(parsed.get("instruction") or "").strip()
     return out
 
 
-async def get_transcription_and_traits_async(openai_client: Any, audio_path: str) -> Dict[str, Any]:
-    """Get transcription and voice traits from one audio using AudioJudge pointwise evaluation.
+async def _judge_audio_pointwise(
+    audio_path: str,
+    system_prompt: str = DESCRIPTION_SYSTEM,
+) -> Optional[Dict[str, Any]]:
+    """Run the GPT-audio pointwise call. Return parsed traits, or None if the call
+    raised, returned success=False, or yielded an empty response.
 
-    Ignores openai_client; uses AudioJudge with OPENAI_AUTH_KEY for consistency.
+    `system_prompt` selects which schema to ask for — DESCRIPTION_SYSTEM for the
+    per-miner structured-only call (used in scoring), SOURCE_DESCRIPTION_SYSTEM for
+    the source-audio call that also returns a natural-language `instruction`.
 
-    Returns:
-        Dict with keys: transcription, gender, pitch, speed, age_group, emotion, tone, accent
+    Callers decide whether None means "skip the round" (source-side use) or "fall back
+    to neutral defaults" (per-miner scoring use).
     """
     judge = _get_judge()
     loop = asyncio.get_event_loop()
@@ -162,7 +206,7 @@ async def get_transcription_and_traits_async(openai_client: Any, audio_path: str
             None,
             lambda: judge.judge_audio_pointwise(
                 audio_path=audio_path,
-                system_prompt=DESCRIPTION_SYSTEM,
+                system_prompt=system_prompt,
                 user_prompt=None,
                 model=GPT_AUDIO_MODEL,
                 concatenation_method="no_concatenation",
@@ -171,24 +215,80 @@ async def get_transcription_and_traits_async(openai_client: Any, audio_path: str
             ),
         )
     except Exception as e:
-        emit_log(f"OpenAI/AudioJudge pointwise failed ({e}), using fallback traits", "warn")
-        return _parse_traits_response("")
+        emit_log(f"OpenAI/AudioJudge pointwise call raised ({e})", "warn")
+        return None
     if not result.get("success"):
+        err = (result.get("error") or "")[:200]
+        emit_log(f"OpenAI/AudioJudge pointwise returned success=False: {err}", "warn")
+        return None
+    response_text = (result.get("response") or "").strip()
+    if not response_text:
+        emit_log("OpenAI/AudioJudge pointwise returned empty response", "warn")
+        return None
+    return _parse_traits_response(response_text)
+
+
+async def try_extract_source_traits_async(openai_client: Any, audio_path: str) -> Optional[Dict[str, Any]]:
+    """Strict source-audio trait extraction for round-driving prompts.
+
+    Uses SOURCE_DESCRIPTION_SYSTEM so the result includes both the structured 8-field
+    schema (used by the scoring rubric) and a natural-language `instruction` field
+    (sent to miners as the /speak `instruction` value — varied phrasing per audio).
+
+    Returns the parsed trait dict on success, or **None** on any failure mode that
+    would leave us without a usable task spec:
+      - the OpenAI call raised (network down, auth bad)
+      - the OpenAI call returned success=False
+      - the response was empty
+      - the response parsed but yielded an empty transcription (nothing for miners to say)
+
+    Callers MUST treat None as "abort the round" — do not call miners, do not submit
+    evaluation data. The validator should wait for the next sample slot and retry.
+    """
+    traits = await _judge_audio_pointwise(audio_path, system_prompt=SOURCE_DESCRIPTION_SYSTEM)
+    if traits is None:
+        return None
+    if not (traits.get("transcription") or "").strip():
+        emit_log("Source trait extraction yielded empty transcription; aborting round", "warn")
+        return None
+    return traits
+
+
+async def get_transcription_and_traits_async(openai_client: Any, audio_path: str) -> Dict[str, Any]:
+    """Lenient trait extraction for per-miner scoring.
+
+    Returns the parsed traits on success, or _FALLBACK_TRAITS (neutral defaults +
+    empty transcription) on any failure. Used inside score_miner_against_spec_async
+    where partial credit is acceptable. For source-audio extraction that gates the
+    whole round, use try_extract_source_traits_async instead.
+    """
+    traits = await _judge_audio_pointwise(audio_path)
+    if traits is None:
         return _parse_traits_response("")
-    return _parse_traits_response(result.get("response", "") or "")
+    return traits
 
 
 def format_task_prompt_for_tts(traits: Dict[str, Any]) -> str:
-    """Format transcription + traits as the miner-facing task string.
+    """Format transcription + voice description as the miner-facing task string.
 
-    Layout: "<transcription> | gender: x | pitch: y | speed: z | age_group: ... | emotion: ... | tone: ... | accent: ..."
+    Layout: "<transcription> | <voice description>".
+
+    When the traits dict carries a natural-language `instruction` field (source-side
+    extraction via SOURCE_DESCRIPTION_SYSTEM), that's used verbatim — varied phrasing
+    per source audio. Falls back to the deterministic structured form
+    "gender: x | pitch: y | ..." only when the natural-language version is missing
+    (per-miner extraction, fallback traits, legacy metadata).
     """
-    parts = [traits.get("transcription", "")]
-    for key in ("gender", "pitch", "speed", "age_group", "emotion", "tone", "accent"):
-        v = traits.get(key)
-        if v:
-            parts.append(f"{key}: {v}")
-    return " | ".join(p for p in parts if p)
+    text = (traits.get("transcription") or "").strip()
+    instruction = (traits.get("instruction") or "").strip()
+    if not instruction:
+        parts = []
+        for key in ("gender", "pitch", "speed", "age_group", "emotion", "tone", "accent"):
+            v = traits.get(key)
+            if v:
+                parts.append(f"{key}: {v}")
+        instruction = " | ".join(parts)
+    return " | ".join(p for p in (text, instruction) if p)
 
 
 # ---------------------------------------------------------------------------

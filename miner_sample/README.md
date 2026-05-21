@@ -6,7 +6,7 @@ This directory contains the **canonical chute template** and an **example HF rep
 
 | Item | Description |
 |------|-------------|
-| **MINER_GUIDE.md** | Full miner flow: repo layout, engine contract, approved variables, render/build/deploy, and **owner-side wrapper integrity** (hash check). |
+| **MINER_GUIDE.md** | Full miner flow: repo layout, engine contract, `miner.py` rules, approved variables, render/build/deploy, and the full owner-side validation checklist. |
 | **chute_template/** | Canonical Jinja2 template (`vocence_chute.py.jinja2`). Render with your `VOCENCE_REPO`, `VOCENCE_REVISION`, `VOCENCE_CHUTES_USER`, `VOCENCE_CHUTE_ID` and use as the deploy script. |
 | **example_repo/** | Example HF repo layout: `miner.py`, `chute_config.yml`, `vocence_config.yaml`. Mock data only; replace with your real engine and model. |
 

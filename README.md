@@ -145,7 +145,7 @@ See the **miner_sample/** directory for the full flow (HF repo + Chutes wrapper)
 
 miner_sample contains:
 
-- **MINER_GUIDE.md** — Repo layout, engine contract, approved variables, render/build/deploy, and owner-side wrapper integrity.
+- **MINER_GUIDE.md** — Repo layout, engine contract, `miner.py` rules, approved variables, render/build/deploy, and owner-side validation.
 - **chute_template/** — Canonical Jinja2 template; render with your four variables.
 - **example_repo/** — Example HF repo layout (mock miner.py, chute_config.yml, vocence_config.yaml).
 
