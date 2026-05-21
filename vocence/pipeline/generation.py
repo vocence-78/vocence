@@ -49,6 +49,7 @@ from vocence.adapters.storage import ensure_bucket_available, upload_sample_data
 from vocence.adapters.media import get_audio_duration
 from vocence.pipeline.evaluation import (
     get_transcription_and_traits_async,
+    try_extract_source_traits_async,
     format_task_prompt_for_tts,
     score_miner_against_spec_async,
 )
@@ -506,8 +507,21 @@ async def generate_samples_continuously(
                 await asyncio.sleep(SECONDS_PER_BLOCK)
                 continue
             
-            # 4. Extract transcription + voice traits from the source audio (task spec for this round)
-            source_traits = await get_transcription_and_traits_async(openai_client, audio_path)
+            # 4. Extract transcription + voice traits from the source audio (task spec for this round).
+            # Hard-fail mode: if the GPT-audio call raises, returns success=False, or yields no
+            # transcription, we abort the round entirely — no miner queries, no live-evaluation
+            # notification to the owner API, no evaluation data submitted. The validator will try
+            # again at the next sample slot.
+            source_traits = await try_extract_source_traits_async(openai_client, audio_path)
+            if source_traits is None:
+                emit_log(
+                    f"Round #{round_num}: source trait extraction failed (OpenAI judge unavailable). "
+                    f"Skipping round; will retry at next sample slot.",
+                    "warn",
+                )
+                # finally block below removes audio_path; outer loop waits for the next slot.
+                continue
+
             description = format_task_prompt_for_tts(source_traits)
             prompt_preview = description[:200] + ("..." if len(description) > 200 else "")
             emit_log(f"Generated prompt: {prompt_preview}", "info")

@@ -147,13 +147,12 @@ def _parse_traits_response(text: str) -> Dict[str, Any]:
     return out
 
 
-async def get_transcription_and_traits_async(openai_client: Any, audio_path: str) -> Dict[str, Any]:
-    """Get transcription and voice traits from one audio using AudioJudge pointwise evaluation.
+async def _judge_audio_pointwise(audio_path: str) -> Optional[Dict[str, Any]]:
+    """Run the GPT-audio pointwise call. Return parsed traits, or None if the call
+    raised, returned success=False, or yielded an empty response.
 
-    Ignores openai_client; uses AudioJudge with OPENAI_AUTH_KEY for consistency.
-
-    Returns:
-        Dict with keys: transcription, gender, pitch, speed, age_group, emotion, tone, accent
+    Callers decide whether None means "skip the round" (source-side use) or "fall back
+    to neutral defaults" (per-miner scoring use).
     """
     judge = _get_judge()
     loop = asyncio.get_event_loop()
@@ -171,11 +170,53 @@ async def get_transcription_and_traits_async(openai_client: Any, audio_path: str
             ),
         )
     except Exception as e:
-        emit_log(f"OpenAI/AudioJudge pointwise failed ({e}), using fallback traits", "warn")
-        return _parse_traits_response("")
+        emit_log(f"OpenAI/AudioJudge pointwise call raised ({e})", "warn")
+        return None
     if not result.get("success"):
+        err = (result.get("error") or "")[:200]
+        emit_log(f"OpenAI/AudioJudge pointwise returned success=False: {err}", "warn")
+        return None
+    response_text = (result.get("response") or "").strip()
+    if not response_text:
+        emit_log("OpenAI/AudioJudge pointwise returned empty response", "warn")
+        return None
+    return _parse_traits_response(response_text)
+
+
+async def try_extract_source_traits_async(openai_client: Any, audio_path: str) -> Optional[Dict[str, Any]]:
+    """Strict source-audio trait extraction for round-driving prompts.
+
+    Returns the parsed trait dict on success, or **None** on any failure mode that
+    would leave us without a usable task spec:
+      - the OpenAI call raised (network down, auth bad)
+      - the OpenAI call returned success=False
+      - the response was empty
+      - the response parsed but yielded an empty transcription (nothing for miners to say)
+
+    Callers MUST treat None as "abort the round" — do not call miners, do not submit
+    evaluation data. The validator should wait for the next sample slot and retry.
+    """
+    traits = await _judge_audio_pointwise(audio_path)
+    if traits is None:
+        return None
+    if not (traits.get("transcription") or "").strip():
+        emit_log("Source trait extraction yielded empty transcription; aborting round", "warn")
+        return None
+    return traits
+
+
+async def get_transcription_and_traits_async(openai_client: Any, audio_path: str) -> Dict[str, Any]:
+    """Lenient trait extraction for per-miner scoring.
+
+    Returns the parsed traits on success, or _FALLBACK_TRAITS (neutral defaults +
+    empty transcription) on any failure. Used inside score_miner_against_spec_async
+    where partial credit is acceptable. For source-audio extraction that gates the
+    whole round, use try_extract_source_traits_async instead.
+    """
+    traits = await _judge_audio_pointwise(audio_path)
+    if traits is None:
         return _parse_traits_response("")
-    return _parse_traits_response(result.get("response", "") or "")
+    return traits
 
 
 def format_task_prompt_for_tts(traits: Dict[str, Any]) -> str:
