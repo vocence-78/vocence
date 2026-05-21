@@ -188,14 +188,12 @@ Validation runs on a **1-hour cycle**. Each new `(model, revision)` is audited o
 | 10 | Combined size of `.safetensors` files ≥ **50 MiB** | `safetensors_below_min_size:<actual><threshold>` |
 | 11 | `vocence_config.yaml` exists and its `model_name` equals the on-chain `model_name` | `vocence_config_missing` / `vocence_config_missing_model_name` / `model_name_mismatch:yaml=...` |
 | 12 | `miner.py` passes the source audit (section 4) | `miner_py_missing` / `banned_call:...` / `banned_import:...` / `from_pretrained_must_use_model_name` |
-| 13 | Per-tensor fingerprint computed and persisted to `repo_tensor_fingerprints` | `tensor_fingerprint_failed` |
+| 13 | Per-tensor fingerprint computed; must not match any existing DB row (current OR historical, any miner) at ≥95% | `tensor_fingerprint_failed` / `tensor_clone_of_existing:<model>@<rev>:ratio=...` |
 
 After all per-miner checks pass, the owner runs **two passes of duplicate detection** across miners. The rule is the same in both passes: earliest commit block keeps `is_valid = True`, later miners flip to invalid.
 
 - **`model_hash` byte-equality** — catches lazy copies where weight files are bit-for-bit identical. Failure reason: `duplicate_model:earliest_uid=<uid>`.
-- **Per-tensor fingerprint** — catches repackaging attacks that produce the same tensor values under different file layout (rename, re-shard, format conversion, non-LFS escape) plus partial-copy attacks where most layers are reused. Two thresholds:
-  - 100% of tensors bit-identical → `tensor_clone_of:earliest_uid=<uid>`
-  - ≥95% of tensors bit-identical → `tensor_near_clone_of:earliest_uid=<uid>:ratio=<r>`. This threshold is calibrated for LoRA-style fine-tuning of a shared base: standard LoRA recipes change 10–25% of tensors so honest independent fine-tunes typically match each other at 75–90% and pass cleanly. A cheater who clones an existing miner must modify at least ~5% of tensors to slip through, which materially degrades the model output.
+- **Per-tensor fingerprint (audit time)** — when the owner audits any new `(model, revision)`, the computed fingerprint is compared against **every row already in the `repo_tensor_fingerprints` table** — current miners, historical entries, any owner. If the match ratio is ≥95% against any existing row, the new commit is rejected as `tensor_clone_of_existing:<model>@<rev>:ratio=...` and the fingerprint is **NOT** stored (the original row keeps its claim). First-stored-wins, permanently. This catches repackaging attacks (rename, re-shard, format conversion, non-LFS escape) and partial-copy attacks (clone most layers, tweak a few). The 95% threshold is calibrated for LoRA-style fine-tuning: standard LoRA recipes change 10–25% of tensors so honest independent fine-tunes on a shared base typically match each other at 75–90% and pass cleanly. A cheater who clones an existing miner must modify at least ~5% of tensors to slip through, which materially degrades the model output.
 
 Checks 1–8 are the existing chute/HF/wrapper gates; **9–13 plus tensor-fingerprint dedup are the new model-pinning gates** described in section 4.
 
@@ -221,7 +219,7 @@ Two enforcement levels apply. Read this section before deploying. **The owner re
 | Chute name (Chutes-side) missing the substring `vocence` | Auto-reject (`chute_name_missing_vocence`) |
 | Chute not hot, repo or revision missing on Hugging Face | Auto-reject |
 | Model byte-identical to an earlier miner (same `model_hash`) | Auto-reject (`duplicate_model:earliest_uid=<n>`) — later commit loses |
-| Per-tensor fingerprint matches an earlier miner at ≥95% | Auto-reject (`tensor_clone_of` / `tensor_near_clone_of`) — later commit loses |
+| Per-tensor fingerprint matches **any existing entry in the DB** (current OR historical, any miner, ≥95% match) | Auto-reject (`tensor_clone_of_existing:<model>@<rev>:ratio=...`). Checked at audit time; first-stored wins permanently — the rejected fingerprint is NOT stored, so the original keeps its claim. |
 | **Copying another miner's weights in any form** — byte clone, repackage, rename/re-shard, format conversion, ε-noise, precision roundtrip, dtype conversion, partial-layer replacement | **Blacklist** |
 | Registering multiple hotkeys serving the same effective model (Sybil) | **Blacklist** |
 | Repeated attempts to land near-misses just below the 95% dedup threshold | **Blacklist** |

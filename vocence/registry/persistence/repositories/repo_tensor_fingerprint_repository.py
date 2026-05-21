@@ -8,7 +8,7 @@ small (a few KB per miner).
 """
 
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy import select
 
@@ -85,3 +85,46 @@ class RepoTensorFingerprintRepository:
         except Exception as e:
             emit_log(f"tensor fingerprint bulk get failed: {e}", "warn")
         return out
+
+    async def find_collision(
+        self,
+        new_tensors: Dict[str, str],
+        exclude_key: Tuple[str, str],
+        threshold: float,
+    ) -> Optional[Tuple[str, str, float]]:
+        """Find the first stored fingerprint whose tensor match ratio against
+        `new_tensors` is at or above `threshold`.
+
+        Used as the audit-time block: a new (model, revision) whose tensors collide
+        with anything already stored — regardless of which miner owns the existing
+        row or whether that miner is still active — gets rejected.
+
+        Ratio is computed as `count(matching tensor hashes) / len(new_tensors)`. Rows
+        keyed by `exclude_key` (the new commit itself, in case it's already stored)
+        and rows with empty tensor dicts are skipped.
+
+        Returns (matched_model_name, matched_revision, ratio) on the first match, or
+        None if no collision.
+        """
+        if not new_tensors:
+            return None
+        try:
+            async with acquire_session() as session:
+                result = await session.execute(select(RepoTensorFingerprint))
+                for row in result.scalars():
+                    key = (row.model_name, row.model_revision)
+                    if key == exclude_key:
+                        continue
+                    try:
+                        existing = json.loads(row.tensors) or {}
+                    except json.JSONDecodeError:
+                        continue
+                    if not existing:
+                        continue
+                    matching = sum(1 for k, v in new_tensors.items() if existing.get(k) == v)
+                    ratio = matching / len(new_tensors)
+                    if ratio >= threshold:
+                        return (row.model_name, row.model_revision, ratio)
+        except Exception as e:
+            emit_log(f"find_collision query failed: {e}", "warn")
+        return None

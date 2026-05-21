@@ -24,6 +24,20 @@ from huggingface_hub.utils import (
 class _TransientHFError(RuntimeError):
     """HF fetch failed transiently (network / 5xx). Caller should retry, not cache."""
 
+
+class _TensorCollisionError(RuntimeError):
+    """Raised when a new commit's tensor fingerprint matches an existing DB row at
+    or above TENSOR_NEAR_CLONE_THRESHOLD. The new commit must be rejected; the
+    existing row is the claimant and stays untouched.
+    """
+    def __init__(self, matched_model: str, matched_revision: str, ratio: float):
+        self.matched_model = matched_model
+        self.matched_revision = matched_revision
+        self.ratio = ratio
+        super().__init__(
+            f"tensor_clone_of_existing:{matched_model}@{matched_revision}:ratio={ratio:.3f}"
+        )
+
 from vocence.domain.config import (
     HF_AUTH_TOKEN,
     MODEL_FINGERPRINT_CACHE_TTL,
@@ -266,7 +280,10 @@ async def _compute_and_store_fingerprint(
 
     Returns None on permanent failure (parse error, missing file, empty tensors).
     Raises _TransientHFError on transient HF errors so the caller can retry without
-    caching the failure.
+    caching the failure. Raises _TensorCollisionError when the newly-computed
+    fingerprint matches any existing DB row at >= TENSOR_NEAR_CLONE_THRESHOLD —
+    the new commit is rejected at audit time; the existing row stays untouched
+    (first-stored-wins).
 
     Skips the download if an entry for (model_id, revision) already exists.
     """
@@ -306,6 +323,24 @@ async def _compute_and_store_fingerprint(
     if not tensors:
         emit_log(f"safetensors had no tensors for {model_id}@{revision}", "warn")
         return None
+
+    # Audit-time DB collision check: scan every stored fingerprint (any miner,
+    # any revision, current or historical). If the new tensors match at or above
+    # TENSOR_NEAR_CLONE_THRESHOLD, reject this commit and do NOT store its
+    # fingerprint — the existing row remains the claimant.
+    collision = await fp_repo.find_collision(
+        new_tensors=tensors,
+        exclude_key=(model_id, revision),
+        threshold=TENSOR_NEAR_CLONE_THRESHOLD,
+    )
+    if collision is not None:
+        matched_model, matched_rev, ratio = collision
+        emit_log(
+            f"Tensor collision: {model_id}@{revision} matches existing "
+            f"{matched_model}@{matched_rev[:12]} at ratio={ratio:.3f}; rejecting",
+            "warn",
+        )
+        raise _TensorCollisionError(matched_model, matched_rev, ratio)
 
     await fp_repo.upsert(model_id, revision, total_bytes, tensors)
     return _model_hash_from_tensors(tensors)
@@ -385,15 +420,24 @@ async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArt
         _repo_artifact_cache[key] = (result, now)
         return result
 
-    # 4. Tensor fingerprint — compute and persist to DB (if not already there).
-    # The download cost is paid once per (repo, sha); detect_tensor_duplicates then
-    # uses the cached fingerprint for cross-miner comparison. The combined SHA-256
-    # of the tensor dict doubles as model_hash for the fast byte-equality dedup pass.
+    # 4. Tensor fingerprint — compute, run audit-time DB collision check, then
+    # persist (if no collision). The download cost is paid once per (repo, sha).
+    # A collision against ANY existing row (regardless of which miner owns it or
+    # whether they are still active) blocks the new commit; first-stored wins.
     try:
         model_hash = await _compute_and_store_fingerprint(model_id, revision, files)
     except _TransientHFError as e:
         emit_log(f"transient HF error computing tensor fingerprint: {e}", "warn")
         return None
+    except _TensorCollisionError as e:
+        result = RepoArtifactAudit(
+            False,
+            f"tensor_clone_of_existing:{e.matched_model}@{e.matched_revision[:12]}:ratio={e.ratio:.3f}",
+            total_safetensors,
+            None,
+        )
+        _repo_artifact_cache[key] = (result, now)
+        return result
     if model_hash is None:
         result = RepoArtifactAudit(False, "tensor_fingerprint_failed", total_safetensors, None)
         _repo_artifact_cache[key] = (result, now)
