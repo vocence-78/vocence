@@ -123,12 +123,18 @@ Analyze the audio and return a JSON object with these exact keys. For each categ
 - emotion: one of [neutral, happy, sad, angry, calm, excited, serious, fearful]
 - tone: one of [warm, cold, friendly, formal, casual, authoritative]
 - accent: one of [us, uk, au, in, neutral, other]
-- instruction: a single-sentence natural-language voice prompt of the kind a real user would write for a TTS system. Describe the gender, age, accent, emotion, tone, speed, and pitch in natural words — NOT a key:value list. Vary phrasing and word order. Do NOT include the transcription text. Examples of acceptable style: "A friendly female narrator with a British accent, speaking warmly and clearly", "Calm middle-aged man, slow tempo, formal tone, American accent", "Excited young adult speaking quickly in a high-pitched UK voice".
+- instruction: a single-sentence natural-language voice prompt of the kind a real user would write for a TTS system. You MUST describe ALL SEVEN voice dimensions — gender, age_group, accent, emotion, tone, speed, AND pitch — in natural words (NOT a key:value list). Vary phrasing and word order across audios so the instruction reads like genuine user input, not a template. Do NOT include the transcription text. The instruction must be self-contained enough that a reader can infer all seven categorical traits without seeing the structured fields.
 
 Return ONLY valid JSON, no markdown, no commentary. Every categorical value must be one of the listed options exactly as written.
 
-Example:
-{"transcription": "hello world", "gender": "female", "pitch": "high", "speed": "fast", "age_group": "young_adult", "emotion": "happy", "tone": "friendly", "accent": "uk", "instruction": "A cheerful young British woman speaking quickly and brightly"}"""
+Examples of acceptable instruction phrasings (each covers all 7 dimensions):
+- "A cheerful, friendly young adult female speaker with a British accent, talking quickly in a high-pitched voice and a warm tone"
+- "A calm middle-aged American man with a formal authoritative tone, speaking slowly in a deep low-pitched voice"
+- "An excited senior woman, casual and friendly, talking fast in a moderately mid-pitched voice with an Australian accent"
+- "Serious child speaker, neutral American accent, mid-pitched voice, normal speaking pace, cold detached tone"
+
+Example response:
+{"transcription": "hello world", "gender": "female", "pitch": "high", "speed": "fast", "age_group": "young_adult", "emotion": "happy", "tone": "friendly", "accent": "uk", "instruction": "A cheerful, friendly young adult female speaker with a British accent, talking quickly in a high-pitched voice and a warm tone"}"""
 
 
 # ---------------------------------------------------------------------------
