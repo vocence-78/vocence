@@ -22,7 +22,13 @@ from huggingface_hub.utils import (
 
 
 class _TransientHFError(RuntimeError):
-    """HF fetch failed transiently (network / 5xx). Caller should retry, not cache."""
+    """Transient infrastructure error during audit (HF fetch failed, DB unreachable).
+
+    Caller should treat this as inconclusive — retry on the next validation cycle,
+    do NOT cache the failure. Despite the name, this also covers transient DB errors
+    raised during the audit-time tensor-collision check; using one class keeps the
+    "retry next cycle" semantic in a single catch point.
+    """
 
 
 class _TensorCollisionError(RuntimeError):
@@ -177,12 +183,19 @@ async def get_safetensors_files(model_id: str, revision: str) -> Optional[List[T
     return _list_safetensors_files(getattr(info, "siblings", None) or [])
 
 
+# Chunk size for streaming tensor bytes into the hash. 4 MiB is small enough to keep
+# peak memory bounded on multi-GB models, large enough to avoid syscall overhead.
+_TENSOR_HASH_CHUNK_BYTES = 4 * 1024 * 1024
+
+
 def fingerprint_safetensors_file(path: str) -> Dict[str, str]:
     """Compute per-tensor SHA-256 hashes for one .safetensors file.
 
     Parses the safetensors header (8-byte little-endian length + JSON metadata)
-    directly, then hashes each tensor's raw byte range tagged with (name, dtype, shape).
-    No torch / safetensors dependency — we just need byte hashes, not the values.
+    directly, then **streams** each tensor's raw byte range through the hash in
+    fixed-size chunks tagged with (name, dtype, shape). Peak memory is bounded by
+    `_TENSOR_HASH_CHUNK_BYTES` regardless of tensor size — multi-GB models work
+    without OOM. No torch / safetensors dependency.
 
     Returns {tensor_name: hex_sha256}.
     """
@@ -200,11 +213,20 @@ def fingerprint_safetensors_file(path: str) -> Dict[str, str]:
                 continue
             dtype = meta.get("dtype", "")
             shape = tuple(meta.get("shape", []) or [])
-            f.seek(data_start + int(offsets[0]))
-            blob = f.read(int(offsets[1]) - int(offsets[0]))
+            tensor_start = data_start + int(offsets[0])
+            tensor_end = data_start + int(offsets[1])
+            remaining = tensor_end - tensor_start
+            if remaining < 0:
+                continue
+            f.seek(tensor_start)
             h = hashlib.sha256()
             h.update(f"{name}|{dtype}|{shape}|".encode())
-            h.update(blob)
+            while remaining > 0:
+                chunk = f.read(min(_TENSOR_HASH_CHUNK_BYTES, remaining))
+                if not chunk:
+                    break
+                h.update(chunk)
+                remaining -= len(chunk)
             out[name] = h.hexdigest()
     return out
 
@@ -327,12 +349,17 @@ async def _compute_and_store_fingerprint(
     # Audit-time DB collision check: scan every stored fingerprint (any miner,
     # any revision, current or historical). If the new tensors match at or above
     # TENSOR_NEAR_CLONE_THRESHOLD, reject this commit and do NOT store its
-    # fingerprint — the existing row remains the claimant.
-    collision = await fp_repo.find_collision(
-        new_tensors=tensors,
-        exclude_key=(model_id, revision),
-        threshold=TENSOR_NEAR_CLONE_THRESHOLD,
-    )
+    # fingerprint — the existing row remains the claimant. **Fail-closed:** a DB
+    # error during the scan re-raises as transient so the audit doesn't accidentally
+    # let a colliding commit through just because the DB was momentarily down.
+    try:
+        collision = await fp_repo.find_collision(
+            new_tensors=tensors,
+            exclude_key=(model_id, revision),
+            threshold=TENSOR_NEAR_CLONE_THRESHOLD,
+        )
+    except Exception as e:
+        raise _TransientHFError(f"DB error during collision check for {model_id}@{revision}: {e}") from e
     if collision is not None:
         matched_model, matched_rev, ratio = collision
         emit_log(

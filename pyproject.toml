@@ -15,6 +15,7 @@ dependencies = [
     "audiojudge>=0.1.0",
     "click",
     "pydantic>=2.0.0",
+    "pyyaml",
     "rich",
     "yt-dlp",
     # Database
