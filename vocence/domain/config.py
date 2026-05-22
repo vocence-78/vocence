@@ -45,9 +45,14 @@ SAMPLE_SLOT_INTERVAL_BLOCKS = int(os.environ.get("SAMPLE_SLOT_INTERVAL_BLOCKS", 
 SAMPLE_SLOT_OFFSET_BLOCKS = (VALIDATOR_ID % 6) * 25  # 0, 25, 50, 75, 100, 125
 MIN_EVALS_TO_COMPETE = int(os.environ.get("MIN_EVALS_TO_COMPETE", "40"))  # Miner must have more than this many evals in at least 3 validator buckets to be globally eligible
 THRESHOLD_MARGIN = 0.02
-# Cap on how many on-chain commits a hotkey can make at/after COMMIT_LOCK_BLOCK; exceeding this marks the miner invalid.
-# Set COMMIT_LOCK_BLOCK=0 to disable the cap (legacy behaviour).
-COMMIT_LOCK_BLOCK = int(os.environ.get("COMMIT_LOCK_BLOCK", "8081000"))
+# Block height after which on-chain commits are recognized at all. Any commit at a
+# block < COMMIT_LOCK_BLOCK is ignored entirely — not counted toward the per-hotkey
+# cap, not selectable as the miner's current commitment, treated as if it never
+# happened. A hotkey with only pre-cutover commits is skipped (no participant entry).
+# Per-hotkey cap of MAX_POST_CUTOVER_COMMITS field-valid commits applies to commits
+# at/after this block; exceeding the cap marks the miner invalid.
+# Set COMMIT_LOCK_BLOCK=0 to disable both the cutover and the cap (legacy behaviour).
+COMMIT_LOCK_BLOCK = int(os.environ.get("COMMIT_LOCK_BLOCK", "8239720"))
 MAX_POST_CUTOVER_COMMITS = int(os.environ.get("MAX_POST_CUTOVER_COMMITS", "2"))
 # Most recent N evaluations used for scoring (validator S3 + owner metrics). Default 50.
 MAX_EVALS_FOR_SCORING = int(os.environ.get("MAX_EVALS_FOR_SCORING", "50"))
