@@ -211,7 +211,8 @@ Two enforcement levels apply. Read this section before deploying. **The owner re
 | Combined `.safetensors` size under **50 MiB** | Auto-reject (`safetensors_below_min_size`) |
 | Missing or wrong `model_name` in `vocence_config.yaml` | Auto-reject (`vocence_config_missing_model_name` / `model_name_mismatch:yaml=...`) |
 | `model_revision` is a branch name / tag / `latest` instead of a 40-char hex SHA | Auto-reject (`wrapper_revision_not_sha`) → **blacklist** if repeated |
-| More than **2 valid on-chain commits** with one hotkey after block **8081000** | Auto-reject (`too_many_commits`) → **blacklist** if repeated |
+| Any commit at a block **before 8239720** (the `COMMIT_LOCK_BLOCK` cutover) | Ignored entirely — treated as if it never happened. A hotkey with only pre-cutover commits is invisible to the subnet. |
+| More than **2 valid on-chain commits** with one hotkey at/after block **8239720** | Auto-reject (`too_many_commits`) → **blacklist** if repeated |
 | `miner.py` calls any banned function — `snapshot_download`, `hf_hub_download`, `cached_download`, `pipeline`, `torch.hub.load`, `eval`, `exec`, `compile`, `__import__`, `import_module` | Auto-reject (`banned_call:...`) |
 | `miner.py` imports any banned module — `requests`, `urllib*`, `httpx`, `aiohttp`, `socket`, `huggingface_hub`, `importlib`, `torch.hub` | Auto-reject (`banned_import:...`) |
 | `from_pretrained` called with anything other than the bare `model_name` variable (no string literals, no expressions, no other variables) | Auto-reject (`from_pretrained_must_use_model_name`) |
@@ -270,7 +271,7 @@ The following behaviors will get your hotkey blacklisted:
 
 #### E. Chain commitment misconduct
 - Using a branch name (`main`, `dev`, `master`, a tag, `latest`, etc.) instead of a 40-character hex commit SHA for `model_revision`. Branch names are mutable — they can point at different repo contents over time, defeating the whole point of pinning your audit to a specific commit. Auto-rejected as `wrapper_revision_not_sha:<value>`. Repeated attempts will be blacklisted.
-- Making more than **2 on-chain commits** with a single hotkey **after block 8081000** (the `COMMIT_LOCK_BLOCK` cutover). The cap is enforced at field-valid commits, so retrying invalid commits doesn't burn a slot — but spamming valid commits to game the audit cache or probe the validation surface will be blacklisted. Auto-rejected as `too_many_commits:N_post_cutover_max_2_after_block_8081000`.
+- Making more than **2 on-chain commits** with a single hotkey at/after block **8239720** (the `COMMIT_LOCK_BLOCK` cutover). Commits at blocks before the cutover are ignored entirely — they do not count toward the cap and cannot be selected as the miner's current commitment, so a hotkey that only ever committed pre-cutover is invisible to the subnet. The cap is enforced on field-valid post-cutover commits only, so retrying invalid commits doesn't burn a slot — but spamming valid commits to game the audit cache or probe the validation surface will be blacklisted. Auto-rejected as `too_many_commits:N_post_cutover_max_2_after_block_8239720`.
 
 **Any form of cheating not enumerated above is also blacklist-worthy.** The list reflects patterns we know about today; new evasion techniques will be added as they're observed, and behavior that's clearly designed to game the subnet will be blacklisted whether or not it fits an existing category. If you're considering whether something might be "technically allowed" because the rules don't explicitly forbid it — that's exactly the kind of thinking that gets you blacklisted.
 

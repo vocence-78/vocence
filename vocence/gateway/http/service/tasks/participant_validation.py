@@ -116,7 +116,11 @@ class ParticipantValidationTask:
                         })
                         continue
                     
-                    # Enforce per-hotkey commit cap at/after COMMIT_LOCK_BLOCK (only field-valid commits consume a slot)
+                    # Pre-cutover commits are ignored entirely: not counted toward the cap,
+                    # not selectable as the miner's current commitment. A hotkey with no
+                    # field-valid commits at/after COMMIT_LOCK_BLOCK is skipped (treated as
+                    # if it never committed). The cap of MAX_POST_CUTOVER_COMMITS applies
+                    # to field-valid commits at/after the cutover only.
                     if COMMIT_LOCK_BLOCK > 0:
                         post_cutover = []
                         for b, v in commit_data:
@@ -138,7 +142,12 @@ class ParticipantValidationTask:
                                 ),
                             })
                             continue
-                        commit_block, commit_value = post_cutover[-1] if post_cutover else commit_data[-1]
+                        if not post_cutover:
+                            # No field-valid commits after the cutover — this miner is
+                            # invisible to the subnet. Skip entirely; don't fall back to
+                            # any pre-cutover commit.
+                            continue
+                        commit_block, commit_value = post_cutover[-1]
                     else:
                         commit_block, commit_value = commit_data[-1]
                     parsed = parse_commitment(commit_value)
