@@ -1,6 +1,6 @@
 [project]
 name = "vocence"
-version = "0.1.0"
+version = "0.1.1"
 description = "Voice intelligence subnet on Bittensor (PromptTTS, STT, STS, cloning, etc.); Q1 focuses on PromptTTS evaluation"
 readme = "README.md"
 requires-python = ">=3.12"
