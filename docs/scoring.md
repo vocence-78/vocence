@@ -11,7 +11,7 @@ Vocence uses a two-stage validator flow:
 1. **Sample generation**
    Each validator generates its own evaluation samples:
    - download random source audio from the corpus bucket
-   - extract a task spec from the source audio via GPT-4o audio
+   - extract a task spec from the source audio via gpt-audio-1.5
    - call miners' `/speak` endpoints with that spec
    - extract the same fields from each miner's audio and score element-by-element against the spec
    - pairwise-compare each miner's audio vs the source for naturalness
@@ -52,9 +52,11 @@ Default Q1 behavior expects source clips around 20 to 25 seconds.
 
 ### Task spec extraction
 
-Vocence does not generate arbitrary text prompts. The task is derived directly from the selected source audio via a single pointwise GPT-4o-audio-preview call.
+Vocence does not generate arbitrary text prompts. The task is derived directly from the selected source audio via a single pointwise gpt-audio-1.5 call.
 
-The judge returns a JSON object with these closed-enum fields (the **task spec**):
+The judge returns a JSON object containing two parallel views of the same voice — both produced in one call:
+
+**Structured fields (closed enums)** — drive deterministic scoring:
 
 - `transcription` — exact words spoken
 - `gender` — one of `male`, `female`, `neutral`
@@ -65,32 +67,38 @@ The judge returns a JSON object with these closed-enum fields (the **task spec**
 - `tone` — one of `warm`, `cold`, `friendly`, `formal`, `casual`, `authoritative`
 - `accent` — one of `us`, `uk`, `au`, `in`, `neutral`, `other`
 
-The spec is persisted in `metadata.prompt.spec` for auditability and for deterministic re-scoring.
+**Natural-language instruction** — what miners actually receive:
+
+- `instruction` — a single-sentence voice prompt of the kind a real user would write (e.g., *"An adult female with an American accent, speaking at a normal pace in a mid-range pitch, sounding neutral and formal throughout"*). The prompt must cover all seven trait dimensions in natural words; phrasing and word order vary per source audio. The natural-language form is **never** consumed by scoring — it exists only as input to miners and to test that miners' models handle realistic user-style prompts rather than overfitting to a deterministic `key: value` template.
+
+The full structured spec (and the natural-language `instruction`) is persisted in `metadata.prompt.spec` for auditability and deterministic re-scoring.
 
 ### What miners receive
 
-The spec is flattened into the canonical `/speak` request payload:
+The validator sends the natural-language `instruction` verbatim — **not** the structured form:
 
 ```json
 {
   "text": "<transcription>",
-  "instruction": "gender: <...> | pitch: <...> | speed: <...> | age_group: <...> | emotion: <...> | tone: <...> | accent: <...>"
+  "instruction": "An adult female with an American accent, speaking at a normal pace in a mid-range pitch, sounding neutral and formal throughout"
 }
 ```
 
 - `text` is the spoken content to synthesize.
-- `instruction` is the voice/style description inferred from the source audio.
+- `instruction` is the natural-language voice description, varied per source audio.
+
+Miners **must** pass `text` and `instruction` to their TTS model verbatim. Any rewriting, paraphrasing, expansion, normalization, prosody-tagging, SSML injection, or other "prompt enrichment" of either string is prohibited (see `miner_sample/MINER_GUIDE.md` section 8b.C — leads to blacklisting).
 
 ---
 
 ## How Miner Outputs Are Evaluated
 
-After miners return generated audio, the validator runs **two GPT-4o audio calls per miner in parallel**:
+After miners return generated audio, the validator runs **two gpt-audio-1.5 calls per miner in parallel**:
 
-1. **Pointwise extraction** on the miner's audio — returns the same 8-field schema as the source spec.
+1. **Pointwise extraction** on the miner's audio — returns the structured 8-field schema (transcription + 7 closed-enum traits). The natural-language `instruction` field is **source-only** and is not requested for per-miner extraction; per-miner audio is consumed solely for structured comparison.
 2. **Pairwise naturalness** — GPT hears the source audio and the miner audio (presentation order randomized to neutralize position bias) and answers `FIRST` or `SECOND` for which clip sounds more natural as human speech.
 
-The extracted miner fields are compared element-by-element against the spec. The pairwise naturalness result contributes one additional element.
+The extracted miner fields are compared element-by-element against the structured source spec. The pairwise naturalness result contributes one additional element. The natural-language `instruction` sent to the miner as their prompt is **not** an input to scoring at any point.
 
 ### Scoring rules per element
 
@@ -366,8 +374,8 @@ they should compute the same winner within that window.
 
 Per evaluation round:
 
-- **1** GPT-4o-audio pointwise call on the source audio (task spec extraction)
-- **2N** GPT-4o-audio calls for N successful miners (pointwise extraction + pairwise naturalness, run in parallel per miner)
+- **1** gpt-audio-1.5 pointwise call on the source audio (returns structured 8-field spec **and** natural-language instruction in a single call)
+- **2N** gpt-audio-1.5 calls for N successful miners (structured-only pointwise extraction + pairwise naturalness, run in parallel per miner)
 
 Judge concurrency is capped at `MAX_PARALLEL_EVALS` (default 4). Miner `/speak` concurrency is capped at `MAX_PARALLEL_MINERS` (default 20).
 

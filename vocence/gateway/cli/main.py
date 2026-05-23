@@ -227,32 +227,47 @@ def start_validator():
 # Query commands
 @cli.command("get-miners")
 def get_miners():
-    """List miners with their committed chutes."""
+    """List miners with their committed chutes.
+
+    Only commits at/after COMMIT_LOCK_BLOCK are recognized — pre-cutover commits
+    are ignored entirely, matching the owner-side validation rule.
+    """
     import bittensor as bt
-    
-    from vocence.domain.config import SUBNET_ID, CHAIN_NETWORK
+
+    from vocence.domain.config import SUBNET_ID, CHAIN_NETWORK, COMMIT_LOCK_BLOCK
     from vocence.shared.logging import emit_log, print_header
-    from vocence.adapters.chain import parse_commitment
-    
+    from vocence.adapters.chain import parse_commitment, validate_commitment_fields
+
     async def run():
         print_header("Vocence Miners")
-        
+
         subtensor = bt.AsyncSubtensor(network=CHAIN_NETWORK)
         current_block = await subtensor.get_current_block()
         commits = await subtensor.get_all_revealed_commitments(SUBNET_ID, block=current_block)
-        
+
         if not commits:
             emit_log("No miner commitments found", "warn")
             return
-        
+
         for hotkey, commit_data in commits.items():
-            commit_block, commit_value = commit_data[-1]
+            # Filter to commits at/after the cutover. Pre-cutover commits are
+            # not recognized as commitments at all.
+            if COMMIT_LOCK_BLOCK > 0:
+                recognized = [
+                    (b, v) for b, v in commit_data
+                    if b >= COMMIT_LOCK_BLOCK and validate_commitment_fields(parse_commitment(v))[0]
+                ]
+            else:
+                recognized = list(commit_data)
+            if not recognized:
+                continue
+            commit_block, commit_value = recognized[-1]
             parsed = parse_commitment(commit_value)
             model_name = parsed.get("model_name", "unknown")
             model_revision = parsed.get("model_revision", "unknown")[:8]
             chute_id = parsed.get("chute_id", "unknown")
             emit_log(f"{hotkey[:8]}: {model_name}@{model_revision} chute={chute_id} (block {commit_block})", "info")
-    
+
     asyncio.run(run())
 
 
