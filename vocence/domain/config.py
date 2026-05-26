@@ -192,6 +192,56 @@ BASE_MODEL_COMMIT_BLOCK = 1000  # Block at which owner is treated as committed (
 # UID 0 is the burn key on Bittensor; when no miner is eligible, validators set weight 1 on UID 0 to burn incentives.
 BURN_UID = 0
 
+# ---------------------------------------------------------------------------
+# Canonical miner.py enforcement
+# ---------------------------------------------------------------------------
+# SHA-256 of the locked miner.py that all miners must ship byte-for-byte.
+# Miners fine-tune the Qwen3 1.7B 12Hz voice-design model; this fixed inference
+# script prevents pre/post-processing, alternative models, and speaker-embedding
+# injection through the inference path.
+CANONICAL_MINER_PY_SHA256 = "4e57d5ee0151681931d6601503fc8e1d21b9d2f22b2e359778727b14ee6ea212"
+
+# Exhaustive whitelist of files allowed in a miner's HF repo. Any file not in
+# this set is rejected; miners cannot add new files.
+REPO_FILE_MANIFEST = frozenset({
+    ".gitattributes",
+    ".gitignore",
+    "README.md",
+    "chute_config.yml",
+    "config.json",
+    "generation_config.json",
+    "merges.txt",
+    "miner.py",
+    "model.safetensors",
+    "preprocessor_config.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "vocence_config.yaml",
+    "speech_tokenizer/model.safetensors",
+    "speech_tokenizer/config.json",
+    "speech_tokenizer/configuration.json",
+    "speech_tokenizer/preprocessor_config.json",
+})
+
+# Subset of REPO_FILE_MANIFEST that must be present. Metadata files like
+# .gitattributes, .gitignore, and README.md are optional.
+REPO_REQUIRED_FILES = frozenset({
+    "config.json",
+    "generation_config.json",
+    "merges.txt",
+    "miner.py",
+    "model.safetensors",
+    "preprocessor_config.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "vocence_config.yaml",
+    "chute_config.yml",
+    "speech_tokenizer/model.safetensors",
+    "speech_tokenizer/config.json",
+    "speech_tokenizer/configuration.json",
+    "speech_tokenizer/preprocessor_config.json",
+})
+
 # HuggingFace configuration
 HF_AUTH_TOKEN = os.environ.get("HF_AUTH_TOKEN")
 MODEL_FINGERPRINT_CACHE_TTL = int(os.environ.get("MODEL_FINGERPRINT_CACHE_TTL", "3600"))  # 1 hour
