@@ -17,7 +17,7 @@ Your HF repo must contain **exactly** the files listed below. No additional file
 
 | File | Required | Replaceable | Description |
 |------|----------|-------------|-------------|
-| `miner.py` | Yes | **No (locked)** | Canonical inference script. Must be byte-identical to the locked version. |
+| `miner.py` | Yes | **No (locked)** | Canonical inference script. Copy from `miner_sample/example_repo/miner.py` — must be byte-identical. |
 | `model.safetensors` | Yes | Yes | Main model weights (fine-tuned). |
 | `config.json` | Yes | Yes | Model configuration. |
 | `generation_config.json` | Yes | Yes | Generation parameters. |
@@ -55,7 +55,7 @@ The wrapper has already downloaded your repo and the HF cache is populated befor
 
 ## 4. `miner.py` rules
 
-**`miner.py` is locked.** All miners must ship the exact canonical `miner.py` — byte-for-byte identical. This is enforced by SHA-256 hash check both owner-side at registration and at chute startup by the canonical wrapper.
+**`miner.py` is locked.** All miners must ship the exact canonical `miner.py` — byte-for-byte identical. Copy it from `miner_sample/example_repo/miner.py` in this repository into your HF repo. Do not modify it in any way. This is enforced by SHA-256 hash check both owner-side at registration and at chute startup by the canonical wrapper.
 
 The locked `miner.py` loads the Qwen3 1.7B 12Hz voice-design model from the local repo snapshot and runs inference using the standard `generate_voice_design(text, language, instruct)` API. Miners cannot add audio pre-processing, post-processing, speaker embeddings, or use alternative models — the inference path is fully determined by the locked script.
 
