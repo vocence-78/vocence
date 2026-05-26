@@ -131,11 +131,11 @@ class RepoTensorFingerprintRepository:
         return None
 
     async def delete(self, model_name: str, model_revision: str) -> None:
-        """Remove a fingerprint row. Used when an earlier-block miner evicts an existing entry."""
-        try:
-            async with acquire_session() as session:
-                row = await session.get(RepoTensorFingerprint, (model_name, model_revision))
-                if row is not None:
-                    await session.delete(row)
-        except Exception as e:
-            emit_log(f"tensor fingerprint delete failed for {model_name}@{model_revision}: {e}", "warn")
+        """Remove a fingerprint row. Used when an earlier-block miner evicts an existing entry.
+
+        Raises on failure so the caller can treat it as transient and retry next cycle.
+        """
+        async with acquire_session() as session:
+            row = await session.get(RepoTensorFingerprint, (model_name, model_revision))
+            if row is not None:
+                await session.delete(row)

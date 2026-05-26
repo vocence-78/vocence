@@ -418,7 +418,10 @@ async def _compute_and_store_fingerprint(
                 f"evicting existing entry",
                 "warn",
             )
-            await fp_repo.delete(matched_model, matched_rev)
+            try:
+                await fp_repo.delete(matched_model, matched_rev)
+            except Exception as e:
+                raise _TransientHFError(f"DB error evicting {matched_model}@{matched_rev}: {e}") from e
             _repo_artifact_cache.pop((matched_model, matched_rev), None)
             continue
         emit_log(
