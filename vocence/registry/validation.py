@@ -51,6 +51,8 @@ from vocence.domain.config import (
     BASE_MODEL_MODEL_NAME,
     BASE_MODEL_MODEL_REVISION,
     BASE_MODEL_WEIGHTS_HASH,
+    REPO_FILE_MANIFEST,
+    REPO_REQUIRED_FILES,
 )
 from vocence.shared.logging import emit_log
 from vocence.domain.entities import ParticipantInfo
@@ -60,7 +62,7 @@ from vocence.registry.wrapper_integrity import (
     extract_approved_variables,
     is_valid_hf_revision,
 )
-from vocence.registry.source_audit import verify_miner_source, verify_vocence_config
+from vocence.registry.source_audit import verify_miner_py_hash, verify_vocence_config
 
 # Chute name must contain this substring (case-insensitive) for owner validation to pass.
 # Checked against the chute name from Chutes API (e.g. vocence-parler-tts-010), not chute_id (UUID).
@@ -163,11 +165,8 @@ def _list_safetensors_files(siblings: List[Any]) -> List[Tuple[str, int]]:
     return out
 
 
-async def get_safetensors_files(model_id: str, revision: str) -> Optional[List[Tuple[str, int]]]:
-    """Return [(filename, size)] of .safetensors files in an HF repo at a revision.
-
-    Returns [] if the repo has none, or None on transient HF fetch failure.
-    """
+async def _fetch_repo_info(model_id: str, revision: str) -> Optional[Any]:
+    """Fetch HF RepoInfo for (model_id, revision). Returns None on transient failure."""
     def _fetch(token):
         return HfApi(token=token).repo_info(
             repo_id=model_id,
@@ -176,11 +175,57 @@ async def get_safetensors_files(model_id: str, revision: str) -> Optional[List[T
             files_metadata=True,
         )
     try:
-        info = await asyncio.to_thread(_fetch, HF_AUTH_TOKEN or None)
+        return await asyncio.to_thread(_fetch, HF_AUTH_TOKEN or None)
     except Exception as e:
-        emit_log(f"repo_info failed for {model_id}@{revision} (safetensors): {e}", "warn")
+        emit_log(f"repo_info failed for {model_id}@{revision}: {e}", "warn")
         return None
-    return _list_safetensors_files(getattr(info, "siblings", None) or [])
+
+
+def _list_all_files(siblings: List[Any]) -> List[str]:
+    """Return all file paths from repo siblings."""
+    out: List[str] = []
+    for s in siblings:
+        name = getattr(s, "rfilename", None) or getattr(s, "path", "") or ""
+        if name:
+            out.append(name)
+    return out
+
+
+async def get_safetensors_files(model_id: str, revision: str, repo_info: Optional[Any] = None) -> Optional[List[Tuple[str, int]]]:
+    """Return [(filename, size)] of .safetensors files in an HF repo at a revision.
+
+    Returns [] if the repo has none, or None on transient HF fetch failure.
+    Accepts a pre-fetched repo_info to avoid redundant API calls.
+    """
+    if repo_info is None:
+        repo_info = await _fetch_repo_info(model_id, revision)
+    if repo_info is None:
+        return None
+    return _list_safetensors_files(getattr(repo_info, "siblings", None) or [])
+
+
+async def get_repo_file_list(model_id: str, revision: str, repo_info: Optional[Any] = None) -> Optional[List[str]]:
+    """Return the complete list of file paths in an HF repo at a revision.
+
+    Returns None on transient HF fetch failure.
+    """
+    if repo_info is None:
+        repo_info = await _fetch_repo_info(model_id, revision)
+    if repo_info is None:
+        return None
+    return _list_all_files(getattr(repo_info, "siblings", None) or [])
+
+
+def verify_repo_manifest(file_list: List[str]) -> Tuple[bool, Optional[str]]:
+    """Check that the repo contains only allowed files and all required files are present."""
+    file_set = set(file_list)
+    extra = file_set - REPO_FILE_MANIFEST
+    if extra:
+        return False, f"extra_files:{','.join(sorted(extra))}"
+    missing = REPO_REQUIRED_FILES - file_set
+    if missing:
+        return False, f"missing_required_files:{','.join(sorted(missing))}"
+    return True, None
 
 
 # Chunk size for streaming tensor bytes into the hash. 4 MiB is small enough to keep
@@ -296,6 +341,7 @@ async def _compute_and_store_fingerprint(
     model_id: str,
     revision: str,
     safetensors_files: List[Tuple[str, int]],
+    block: int = 0,
 ) -> Optional[str]:
     """Compute per-tensor fingerprint, persist to repo_tensor_fingerprints, return
     the combined model_hash.
@@ -303,9 +349,11 @@ async def _compute_and_store_fingerprint(
     Returns None on permanent failure (parse error, missing file, empty tensors).
     Raises _TransientHFError on transient HF errors so the caller can retry without
     caching the failure. Raises _TensorCollisionError when the newly-computed
-    fingerprint matches any existing DB row at >= TENSOR_NEAR_CLONE_THRESHOLD —
-    the new commit is rejected at audit time; the existing row stays untouched
-    (first-stored-wins).
+    fingerprint matches any existing DB row at >= TENSOR_NEAR_CLONE_THRESHOLD and the
+    existing row has an earlier or equal commit block (earliest-block-wins).
+
+    If the new commit has an earlier block than the colliding row, the existing row
+    is evicted and the new fingerprint is stored instead.
 
     Skips the download if an entry for (model_id, revision) already exists.
     """
@@ -346,34 +394,48 @@ async def _compute_and_store_fingerprint(
         emit_log(f"safetensors had no tensors for {model_id}@{revision}", "warn")
         return None
 
-    # Audit-time DB collision check: scan every stored fingerprint (any miner,
-    # any revision, current or historical). If the new tensors match at or above
-    # TENSOR_NEAR_CLONE_THRESHOLD, reject this commit and do NOT store its
-    # fingerprint — the existing row remains the claimant. **Fail-closed:** a DB
-    # error during the scan re-raises as transient so the audit doesn't accidentally
-    # let a colliding commit through just because the DB was momentarily down.
-    try:
-        collision = await fp_repo.find_collision(
-            new_tensors=tensors,
-            exclude_key=(model_id, revision),
-            threshold=TENSOR_NEAR_CLONE_THRESHOLD,
-        )
-    except Exception as e:
-        raise _TransientHFError(f"DB error during collision check for {model_id}@{revision}: {e}") from e
-    if collision is not None:
-        matched_model, matched_rev, ratio = collision
+    # Audit-time DB collision check: scan every stored fingerprint. If the new
+    # tensors match at >= TENSOR_NEAR_CLONE_THRESHOLD, compare commit blocks:
+    # the miner who committed on-chain earlier wins. If the new commit is earlier,
+    # evict the existing row and re-scan (there may be multiple collisions).
+    # Fail-closed on DB errors.
+    while True:
+        try:
+            collision = await fp_repo.find_collision(
+                new_tensors=tensors,
+                exclude_key=(model_id, revision),
+                threshold=TENSOR_NEAR_CLONE_THRESHOLD,
+            )
+        except Exception as e:
+            raise _TransientHFError(f"DB error during collision check for {model_id}@{revision}: {e}") from e
+        if collision is None:
+            break
+        matched_model, matched_rev, ratio, existing_block = collision
+        if block > 0 and existing_block > 0 and block < existing_block:
+            emit_log(
+                f"Tensor collision: {model_id}@{revision} (block={block}) has earlier "
+                f"block than {matched_model}@{matched_rev[:12]} (block={existing_block}); "
+                f"evicting existing entry",
+                "warn",
+            )
+            try:
+                await fp_repo.delete(matched_model, matched_rev)
+            except Exception as e:
+                raise _TransientHFError(f"DB error evicting {matched_model}@{matched_rev}: {e}") from e
+            _repo_artifact_cache.pop((matched_model, matched_rev), None)
+            continue
         emit_log(
-            f"Tensor collision: {model_id}@{revision} matches existing "
-            f"{matched_model}@{matched_rev[:12]} at ratio={ratio:.3f}; rejecting",
+            f"Tensor collision: {model_id}@{revision} (block={block}) matches existing "
+            f"{matched_model}@{matched_rev[:12]} (block={existing_block}) at ratio={ratio:.3f}; rejecting",
             "warn",
         )
         raise _TensorCollisionError(matched_model, matched_rev, ratio)
 
-    await fp_repo.upsert(model_id, revision, total_bytes, tensors)
+    await fp_repo.upsert(model_id, revision, total_bytes, tensors, commit_block=block)
     return _model_hash_from_tensors(tensors)
 
 
-async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArtifactAudit]:
+async def audit_repo_artifacts(model_id: str, revision: str, block: int = 0) -> Optional[RepoArtifactAudit]:
     """Run all immutable per-repo checks once and cache by (model_id, revision).
 
     Repo content at a pinned HF sha cannot change, so once we've audited a (repo, sha)
@@ -382,9 +444,10 @@ async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArt
 
     Steps:
       1. .safetensors files present and totaling >= MIN_SAFETENSORS_BYTES
-      2. vocence_config.yaml declares model_name == on-chain model_name
-      3. miner.py source audit (from_pretrained(model_name), no banned calls/imports)
-      4. tensor fingerprint computed and persisted to repo_tensor_fingerprints
+      2. File manifest check (no extra files, all required files present)
+      3. vocence_config.yaml declares model_name == on-chain model_name
+      4. miner.py canonical hash check (must be byte-identical to locked version)
+      5. tensor fingerprint computed and persisted to repo_tensor_fingerprints
 
     Returns None on transient HF errors so the caller can retry on the next cycle.
     """
@@ -395,10 +458,13 @@ async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArt
         if now - cached_at < MODEL_FINGERPRINT_CACHE_TTL:
             return cached
 
-    # 1. Safetensors presence + minimum size. Miners must ship weights as .safetensors
-    # so we can compute tensor-level fingerprints; pickle-format weights are also a
-    # remote-code-execution surface we don't want on the owner.
-    files = await get_safetensors_files(model_id, revision)
+    # Fetch repo info once (shared across safetensors + file manifest checks).
+    repo_info = await _fetch_repo_info(model_id, revision)
+    if repo_info is None:
+        return None  # transient
+
+    # 1. Safetensors presence + minimum size.
+    files = await get_safetensors_files(model_id, revision, repo_info=repo_info)
     if files is None:
         return None  # transient
     if not files:
@@ -415,7 +481,17 @@ async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArt
         _repo_artifact_cache[key] = (result, now)
         return result
 
-    # 2. vocence_config.yaml.
+    # 2. File manifest — only whitelisted files allowed, required files must exist.
+    file_list = await get_repo_file_list(model_id, revision, repo_info=repo_info)
+    if file_list is None:
+        return None  # transient
+    ok, reason = verify_repo_manifest(file_list)
+    if not ok:
+        result = RepoArtifactAudit(False, reason or "manifest_invalid", total_safetensors)
+        _repo_artifact_cache[key] = (result, now)
+        return result
+
+    # 3. vocence_config.yaml.
     try:
         yaml_text = await asyncio.to_thread(_fetch_repo_text_file, model_id, revision, "vocence_config.yaml")
     except _TransientHFError as e:
@@ -431,7 +507,7 @@ async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArt
         _repo_artifact_cache[key] = (result, now)
         return result
 
-    # 3. miner.py source audit.
+    # 4. miner.py canonical hash check — must be byte-identical to the locked version.
     try:
         miner_src = await asyncio.to_thread(_fetch_repo_text_file, model_id, revision, "miner.py")
     except _TransientHFError as e:
@@ -441,18 +517,17 @@ async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArt
         result = RepoArtifactAudit(False, "miner_py_missing", total_safetensors)
         _repo_artifact_cache[key] = (result, now)
         return result
-    ok, reason = verify_miner_source(miner_src)
+    ok, reason = verify_miner_py_hash(miner_src)
     if not ok:
-        result = RepoArtifactAudit(False, reason or "miner_py_invalid", total_safetensors)
+        result = RepoArtifactAudit(False, reason or "miner_py_hash_mismatch", total_safetensors)
         _repo_artifact_cache[key] = (result, now)
         return result
 
-    # 4. Tensor fingerprint — compute, run audit-time DB collision check, then
-    # persist (if no collision). The download cost is paid once per (repo, sha).
-    # A collision against ANY existing row (regardless of which miner owns it or
-    # whether they are still active) blocks the new commit; first-stored wins.
+    # 5. Tensor fingerprint — compute, run audit-time DB collision check, then
+    # persist. Earliest commit block wins; if the new commit is earlier than an
+    # existing collision, the existing entry is evicted.
     try:
-        model_hash = await _compute_and_store_fingerprint(model_id, revision, files)
+        model_hash = await _compute_and_store_fingerprint(model_id, revision, files, block=block)
     except _TransientHFError as e:
         emit_log(f"transient HF error computing tensor fingerprint: {e}", "warn")
         return None
@@ -605,7 +680,7 @@ async def validate_miner(
     # Bundled and cached by (model, revision); each unique commit is audited once ever.
     # Revision existence is checked implicitly: any HF call inside the audit raises
     # RevisionNotFoundError if the pinned sha doesn't exist.
-    audit = await audit_repo_artifacts(model_name, model_revision)
+    audit = await audit_repo_artifacts(model_name, model_revision, block=block)
     if audit is None:
         info.invalid_reason = "repo_audit_fetch_failed"
         emit_log(f"uid {uid} ({hotkey[:12]}...): transient HF fetch error, will retry next cycle", "warn")

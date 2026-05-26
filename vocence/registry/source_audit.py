@@ -11,9 +11,12 @@ stay byte-for-byte equivalent in behavior across both sides.
 """
 
 import ast
+import hashlib
 from typing import Any, Tuple
 
 import yaml
+
+from vocence.domain.config import CANONICAL_MINER_PY_SHA256
 
 # Last-component call names that are forbidden anywhere in miner.py.
 _BANNED_CALL_NAMES = frozenset({
@@ -49,6 +52,19 @@ def _call_dotted_name(call: ast.Call) -> str:
 
 def _import_banned(name: str) -> bool:
     return any(name == p or name.startswith(p + ".") for p in _BANNED_IMPORT_PREFIXES)
+
+
+def verify_miner_py_hash(source: str) -> Tuple[bool, str | None]:
+    """Check that miner.py is byte-identical to the canonical locked version.
+
+    Returns (True, None) if the hash matches, (False, reason) otherwise.
+    """
+    if not source:
+        return False, "miner_py_empty"
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    if digest != CANONICAL_MINER_PY_SHA256:
+        return False, "miner_py_hash_mismatch"
+    return True, None
 
 
 def verify_miner_source(source: str) -> Tuple[bool, str | None]:
