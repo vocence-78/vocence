@@ -397,16 +397,19 @@ async def _compute_and_store_fingerprint(
     # Audit-time DB collision check: scan every stored fingerprint. If the new
     # tensors match at >= TENSOR_NEAR_CLONE_THRESHOLD, compare commit blocks:
     # the miner who committed on-chain earlier wins. If the new commit is earlier,
-    # evict the existing row and store the new one. Fail-closed on DB errors.
-    try:
-        collision = await fp_repo.find_collision(
-            new_tensors=tensors,
-            exclude_key=(model_id, revision),
-            threshold=TENSOR_NEAR_CLONE_THRESHOLD,
-        )
-    except Exception as e:
-        raise _TransientHFError(f"DB error during collision check for {model_id}@{revision}: {e}") from e
-    if collision is not None:
+    # evict the existing row and re-scan (there may be multiple collisions).
+    # Fail-closed on DB errors.
+    while True:
+        try:
+            collision = await fp_repo.find_collision(
+                new_tensors=tensors,
+                exclude_key=(model_id, revision),
+                threshold=TENSOR_NEAR_CLONE_THRESHOLD,
+            )
+        except Exception as e:
+            raise _TransientHFError(f"DB error during collision check for {model_id}@{revision}: {e}") from e
+        if collision is None:
+            break
         matched_model, matched_rev, ratio, existing_block = collision
         if block > 0 and existing_block > 0 and block < existing_block:
             emit_log(
@@ -415,14 +418,18 @@ async def _compute_and_store_fingerprint(
                 f"evicting existing entry",
                 "warn",
             )
-            await fp_repo.delete(matched_model, matched_rev)
-        else:
-            emit_log(
-                f"Tensor collision: {model_id}@{revision} (block={block}) matches existing "
-                f"{matched_model}@{matched_rev[:12]} (block={existing_block}) at ratio={ratio:.3f}; rejecting",
-                "warn",
-            )
-            raise _TensorCollisionError(matched_model, matched_rev, ratio)
+            try:
+                await fp_repo.delete(matched_model, matched_rev)
+            except Exception as e:
+                raise _TransientHFError(f"DB error evicting {matched_model}@{matched_rev}: {e}") from e
+            _repo_artifact_cache.pop((matched_model, matched_rev), None)
+            continue
+        emit_log(
+            f"Tensor collision: {model_id}@{revision} (block={block}) matches existing "
+            f"{matched_model}@{matched_rev[:12]} (block={existing_block}) at ratio={ratio:.3f}; rejecting",
+            "warn",
+        )
+        raise _TensorCollisionError(matched_model, matched_rev, ratio)
 
     await fp_repo.upsert(model_id, revision, total_bytes, tensors, commit_block=block)
     return _model_hash_from_tensors(tensors)
@@ -517,9 +524,8 @@ async def audit_repo_artifacts(model_id: str, revision: str, block: int = 0) -> 
         return result
 
     # 5. Tensor fingerprint — compute, run audit-time DB collision check, then
-    # persist (if no collision). The download cost is paid once per (repo, sha).
-    # A collision against ANY existing row (regardless of which miner owns it or
-    # whether they are still active) blocks the new commit; first-stored wins.
+    # persist. Earliest commit block wins; if the new commit is earlier than an
+    # existing collision, the existing entry is evicted.
     try:
         model_hash = await _compute_and_store_fingerprint(model_id, revision, files, block=block)
     except _TransientHFError as e:
