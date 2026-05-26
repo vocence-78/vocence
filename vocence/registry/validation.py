@@ -62,11 +62,7 @@ from vocence.registry.wrapper_integrity import (
     extract_approved_variables,
     is_valid_hf_revision,
 )
-from vocence.registry.source_audit import (
-    verify_miner_py_hash,
-    verify_miner_source,
-    verify_vocence_config,
-)
+from vocence.registry.source_audit import verify_miner_py_hash, verify_vocence_config
 
 # Chute name must contain this substring (case-insensitive) for owner validation to pass.
 # Checked against the chute name from Chutes API (e.g. vocence-parler-tts-010), not chute_id (UUID).

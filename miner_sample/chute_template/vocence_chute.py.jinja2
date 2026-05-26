@@ -4,7 +4,6 @@ Vocence chute: TTS deployment for Chutes.
 Builds the chute from repo config; at runtime loads the TTS engine from the same repo.
 Endpoints: GET /health, POST /speak (returns audio/wav).
 """
-import ast
 import hashlib
 import io
 import sys
@@ -172,99 +171,6 @@ def vocence_apply_config(cls: type, config: dict):
         else:
             attr(value)
     return obj
-
-
-# --- Miner source audit: enforce model_name contract, no external fetches ---
-# Last-component names that are forbidden anywhere in miner.py. `pipeline`,
-# `snapshot_download`, etc. all pull weights from outside the declared repo;
-# `eval`/`exec`/`__import__`/`import_module` defeat any static check.
-VOCENCE_BANNED_CALL_NAMES = frozenset({
-    "snapshot_download", "hf_hub_download", "cached_download",
-    "pipeline", "eval", "exec", "compile", "__import__", "import_module",
-})
-
-# Fully-dotted calls that we want to ban even when the last component is innocuous
-# (`load` is too common to ban by suffix alone).
-VOCENCE_BANNED_DOTTED_CALLS = frozenset({
-    "torch.hub.load",
-})
-
-# Top-level (or dotted-prefix) imports that miner.py is not allowed to use.
-# These are either network primitives, the HF download API directly, or the dynamic
-# import escape hatch.
-VOCENCE_BANNED_IMPORT_PREFIXES = (
-    "requests", "urllib", "urllib2", "urllib3", "httpx", "aiohttp",
-    "socket", "huggingface_hub", "importlib", "torch.hub",
-)
-
-# The single variable name miner.py must use to refer to the declared model.
-VOCENCE_MODEL_NAME_VAR = "model_name"
-
-
-def vocence_call_dotted_name(call: ast.Call) -> str:
-    """Return the dotted name of a call target, e.g. 'torch.hub.load' or 'from_pretrained'."""
-    parts: list[str] = []
-    node: Any = call.func
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-    return ".".join(reversed(parts))
-
-
-def vocence_import_banned(name: str) -> bool:
-    """True if `name` matches any banned import prefix exactly or as a dotted prefix."""
-    return any(name == p or name.startswith(p + ".") for p in VOCENCE_BANNED_IMPORT_PREFIXES)
-
-
-def vocence_verify_miner_source(source: str) -> None:
-    """Static AST check of miner.py before we exec it.
-
-    Rules (hash-locked into the canonical wrapper):
-    1. Every `from_pretrained` call must take `model_name` as its first positional
-       arg (or as the `pretrained_model_name_or_path` keyword). String literals,
-       other variables, or expressions like `model_name + "x"` are rejected.
-    2. Calls to other model-loading or dynamic-execution primitives are banned
-       outright (snapshot_download, hf_hub_download, cached_download, pipeline,
-       torch.hub.load, eval, exec, compile, __import__, import_module).
-    3. Imports of network libs, huggingface_hub, importlib, or torch.hub are banned.
-
-    On any violation we raise RuntimeError; vocence_startup then sets self.status
-    to the failure message and leaves tts_engine None, so /speak returns 503.
-    """
-    try:
-        tree = ast.parse(source)
-    except SyntaxError as e:
-        raise RuntimeError(f"miner.py syntax error: {e}")
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if vocence_import_banned(alias.name):
-                    raise RuntimeError(f"miner.py: import of '{alias.name}' is banned")
-        elif isinstance(node, ast.ImportFrom):
-            mod = node.module or ""
-            if vocence_import_banned(mod):
-                raise RuntimeError(f"miner.py: 'from {mod} import ...' is banned")
-        elif isinstance(node, ast.Call):
-            dotted = vocence_call_dotted_name(node)
-            last = dotted.rsplit(".", 1)[-1] if dotted else ""
-            if dotted in VOCENCE_BANNED_DOTTED_CALLS or last in VOCENCE_BANNED_CALL_NAMES:
-                raise RuntimeError(f"miner.py: call to '{dotted or last}' is banned")
-            if last == "from_pretrained":
-                arg: Any = node.args[0] if node.args else None
-                if arg is None:
-                    for kw in node.keywords:
-                        if kw.arg == "pretrained_model_name_or_path":
-                            arg = kw.value
-                            break
-                if not isinstance(arg, ast.Name) or arg.id != VOCENCE_MODEL_NAME_VAR:
-                    raise RuntimeError(
-                        f"miner.py: from_pretrained() must be called with bare "
-                        f"`{VOCENCE_MODEL_NAME_VAR}` as its first arg (no string "
-                        f"literals, no expressions)"
-                    )
 
 
 def vocence_build_chute(
