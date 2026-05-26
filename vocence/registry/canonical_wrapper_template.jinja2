@@ -276,9 +276,7 @@ async def vocence_startup(self) -> None:
         print("✅ Vocence repo downloaded (runtime)")
 
         # vocence_config.yaml is mandatory and must declare model_name == VOCENCE_REPO.
-        # This ties the on-chain commitment to the runtime engine: the only way for
-        # miner.py to load weights is from_pretrained(model_name), and model_name has
-        # to match what was committed on chain.
+        # This ties the on-chain commitment to the deployed repo identity.
         vocence_yaml = repo_path / "vocence_config.yaml"
         if not vocence_yaml.exists():
             raise RuntimeError("vocence_config.yaml missing from repo")
