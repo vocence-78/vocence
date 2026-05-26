@@ -52,7 +52,7 @@ THRESHOLD_MARGIN = 0.02
 # Per-hotkey cap of MAX_POST_CUTOVER_COMMITS field-valid commits applies to commits
 # at/after this block; exceeding the cap marks the miner invalid.
 # Set COMMIT_LOCK_BLOCK=0 to disable both the cutover and the cap (legacy behaviour).
-COMMIT_LOCK_BLOCK = int(os.environ.get("COMMIT_LOCK_BLOCK", "8239720"))
+COMMIT_LOCK_BLOCK = int(os.environ.get("COMMIT_LOCK_BLOCK", "8270310"))
 MAX_POST_CUTOVER_COMMITS = int(os.environ.get("MAX_POST_CUTOVER_COMMITS", "2"))
 # Most recent N evaluations used for scoring (validator S3 + owner metrics). Default 50.
 MAX_EVALS_FOR_SCORING = int(os.environ.get("MAX_EVALS_FOR_SCORING", "50"))
