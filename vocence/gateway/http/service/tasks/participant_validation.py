@@ -32,7 +32,7 @@ from vocence.registry.persistence.repositories.miner_repository import MinerRepo
 from vocence.registry.persistence.repositories.blocklist_repository import BlocklistRepository
 from vocence.adapters.chain import parse_commitment, validate_commitment_fields
 from vocence.domain.entities import ParticipantInfo
-from vocence.registry.validation import validate_miner, detect_duplicates
+from vocence.registry.validation import validate_miner, detect_duplicates, detect_tensor_duplicates
 from vocence.gateway.http.service.endpoints.status import record_last_sync
 
 
@@ -70,7 +70,11 @@ class ParticipantValidationTask:
         """Validate all participants from metagraph."""
         print_header("Participant Validation Sync")
         emit_log(
-            "Owner checks per miner: chute_fetch, wrapper_integrity (deploy script hash vs canonical), chute_hot, revision_chute_match, model_fingerprint, revision_hf_match",
+            "Owner checks per miner: chute_fetch, wrapper_integrity, chute_hot, "
+            "wrapper_revision_match, wrapper_repo_match, repo_audit "
+            "(safetensors + vocence_config + miner.py + tensor fingerprint with DB "
+            "collision check); then model_hash and tensor fingerprint duplicate "
+            "detection across miners",
             "info",
         )
 
@@ -113,7 +117,11 @@ class ParticipantValidationTask:
                         })
                         continue
                     
-                    # Enforce per-hotkey commit cap at/after COMMIT_LOCK_BLOCK (only field-valid commits consume a slot)
+                    # Pre-cutover commits are ignored entirely: not counted toward the cap,
+                    # not selectable as the miner's current commitment. A hotkey with no
+                    # field-valid commits at/after COMMIT_LOCK_BLOCK is skipped (treated as
+                    # if it never committed). The cap of MAX_POST_CUTOVER_COMMITS applies
+                    # to field-valid commits at/after the cutover only.
                     if COMMIT_LOCK_BLOCK > 0:
                         post_cutover = []
                         for b, v in commit_data:
@@ -135,7 +143,12 @@ class ParticipantValidationTask:
                                 ),
                             })
                             continue
-                        commit_block, commit_value = post_cutover[-1] if post_cutover else commit_data[-1]
+                        if not post_cutover:
+                            # No field-valid commits after the cutover — this miner is
+                            # invisible to the subnet. Skip entirely; don't fall back to
+                            # any pre-cutover commit.
+                            continue
+                        commit_block, commit_value = post_cutover[-1]
                     else:
                         commit_block, commit_value = commit_data[-1]
                     parsed = parse_commitment(commit_value)
@@ -180,9 +193,14 @@ class ParticipantValidationTask:
                 participant_infos.append(owner_info)
                 emit_log(f"Injected owner participant: uid={OWNER_UID}, hotkey={OWNER_HOTKEY[:12]}..., block={BASE_MODEL_COMMIT_BLOCK}", "info")
 
-            # Apply duplicate detection on validated miners (same model_hash → only earliest block stays valid)
+            # Duplicate detection runs in two passes:
+            #   1) model_hash byte-equality (cheap; catches lazy copies)
+            #   2) per-tensor fingerprint (catches repackaging tricks: rename, re-shard,
+            #      format conversion, non-LFS) by reading repo_tensor_fingerprints
+            # Both follow the same rule: earliest commit block keeps is_valid.
             if participant_infos:
                 participant_infos = detect_duplicates(participant_infos)
+                participant_infos = await detect_tensor_duplicates(participant_infos)
 
             # Merge duplicate-filtered validated miners with earlier invalid/blocked entries
             for info in participant_infos:

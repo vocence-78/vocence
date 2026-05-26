@@ -12,6 +12,7 @@ Architecture:
 """
 
 import asyncio
+import time
 from typing import Dict, Any, List
 
 import bittensor as bt
@@ -62,40 +63,8 @@ from vocence.pipeline.generation import generate_samples_continuously
 from vocence.validator_buckets import ValidatorBucketConfig, load_validator_bucket_configs
 
 
-# Temporary subnet burn flag. When True, the validator skips all miner queries,
-# sample generation, owner-API lookups, and cross-validator scoring, and simply
-# sets weight 1.0 on BURN_UID every cycle. Flip to False to restore normal flow.
-BURN_MODE = True
-
 # Track last cycle we executed so we only run once per cycle when block is in tolerance window
 _last_executed_cycle_block: int | None = None
-
-
-async def _burn_cycle(
-    subtensor_ref: dict,
-    wallet: bt.Wallet,
-    block: int,
-) -> None:
-    """Short-circuit weight-setting: assign all weight to BURN_UID and return."""
-    subtensor = subtensor_ref["client"]
-    emit_log(f"[{block}] BURN_MODE active — setting weight 1 on UID {BURN_UID}", "info")
-    try:
-        await asyncio.wait_for(
-            subtensor.set_weights(
-                wallet=wallet,
-                netuid=SUBNET_ID,
-                uids=[BURN_UID],
-                weights=[1.0],
-                wait_for_inclusion=True,
-            ),
-            timeout=SUBTENSOR_TIMEOUT_SEC,
-        )
-        emit_log(f"[{block}] Set weight 1 on UID {BURN_UID} (burn)", "success")
-    except asyncio.TimeoutError:
-        emit_log(f"[{block}] Timed out setting weights (>{SUBTENSOR_TIMEOUT_SEC}s), reconnecting subtensor...", "error")
-        await _reconnect_subtensor(subtensor_ref)
-    except Exception as e:
-        emit_log(f"[{block}] Failed to set weights (burn): {e}", "error")
 
 
 async def fetch_participants_from_api() -> List[ParticipantInfo]:
@@ -310,10 +279,6 @@ async def execute_cycle(
     """
     subtensor = subtensor_ref["client"]
     _ = storage_client  # generation still uses the local validator bucket; scoring now reads all active validator buckets
-
-    if BURN_MODE:
-        await _burn_cycle(subtensor_ref, wallet, block)
-        return
 
     emit_log(f"[{block}] Fetching participants and active validators from API", "info")
     await _send_weight_setting_graph_event(block, phase="fetching_inputs")
@@ -566,34 +531,23 @@ async def main() -> None:
     """Main entry point for the validator."""
     print_header("Vocence Validator Starting")
 
-    if BURN_MODE:
-        emit_log("BURN_MODE active — skipping CHUTES/OPENAI/Hippius secret checks and client init", "warn")
-
-    # Check required environment variables (only needed when generation/scoring runs)
-    if not BURN_MODE:
-        if not CHUTES_AUTH_KEY:
-            emit_log("CHUTES_AUTH_KEY environment variable required", "error")
-            return
-        if not OPENAI_AUTH_KEY:
-            emit_log("OPENAI_AUTH_KEY environment variable required", "error")
-            return
+    if not CHUTES_AUTH_KEY:
+        emit_log("CHUTES_AUTH_KEY environment variable required", "error")
+        return
+    if not OPENAI_AUTH_KEY:
+        emit_log("OPENAI_AUTH_KEY environment variable required", "error")
+        return
 
     emit_log(f"Using centralized API for miners: {API_URL}", "info")
     emit_log(f"Using corpus bucket (read) and own samples bucket for scoring: {AUDIO_SAMPLES_BUCKET}", "info")
 
-    # Initialize clients. In burn mode we only need subtensor + wallet to set weights.
     # Use a ref so we can replace the subtensor on timeout (reconnect).
     emit_log("Initializing clients...", "info")
     subtensor_ref: dict = {"client": bt.AsyncSubtensor(network=CHAIN_NETWORK)}
     wallet = bt.Wallet(name=COLDKEY_NAME, hotkey=HOTKEY_NAME)
-    if BURN_MODE:
-        corpus_client = None
-        validator_client = None
-        openai_client = None
-    else:
-        corpus_client = create_corpus_storage_client()
-        validator_client = create_validator_storage_client()
-        openai_client = AsyncOpenAI(api_key=OPENAI_AUTH_KEY)
+    corpus_client = create_corpus_storage_client()
+    validator_client = create_validator_storage_client()
+    openai_client = AsyncOpenAI(api_key=OPENAI_AUTH_KEY)
     
     # Log configuration
     emit_log(f"Wallet: {COLDKEY_NAME}/{HOTKEY_NAME}", "info")
@@ -608,34 +562,72 @@ async def main() -> None:
     emit_log(f"Max evals for scoring (recent window): {MAX_EVALS_FOR_SCORING}", "info")
     emit_log(f"Cycle/slot block tolerance: ±{CYCLE_BLOCK_TOLERANCE}, subtensor timeout: {SUBTENSOR_TIMEOUT_SEC}s", "info")
     
-    if BURN_MODE:
-        emit_log("BURN_MODE active — skipping sample generation loop", "warn")
-    else:
-        emit_log("Starting sample generation loop in background...", "start")
+    emit_log("Starting sample generation loop in background...", "start")
 
-        async def get_block_with_timeout() -> int:
-            """Wrap get_current_block with timeout; on timeout reconnect so generator gets fresh connection."""
+    async def get_block_with_timeout() -> int:
+        """Wrap get_current_block with timeout; on timeout reconnect so generator gets fresh connection."""
+        try:
+            return await asyncio.wait_for(subtensor_ref["client"].get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC)
+        except (asyncio.TimeoutError, Exception):
+            emit_log("get_current_block failed in generator, reconnecting subtensor...", "warn")
+            await _reconnect_subtensor(subtensor_ref)
+            raise
+
+    async def run_generator_supervised() -> None:
+        """Run generate_samples_continuously in a supervised loop.
+
+        A bare `asyncio.create_task(generate_samples_continuously(...))` would
+        permanently disable sample generation if any uncaught exception escaped
+        the inner round loop (bucket setup, block waiter, etc.). This wrapper
+        restarts the generator on failure with exponential backoff (12s → 300s
+        cap) and resets the backoff after the generator runs cleanly for at
+        least 60s, so a one-off crash doesn't drag the next restart out.
+        """
+        backoff_initial = 12.0
+        backoff_max = 300.0
+        healthy_reset_threshold = 60.0
+        backoff = backoff_initial
+        import traceback as _tb
+        while True:
+            start_time = time.time()
             try:
-                return await asyncio.wait_for(subtensor_ref["client"].get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC)
-            except (asyncio.TimeoutError, Exception):
-                emit_log("get_current_block failed in generator, reconnecting subtensor...", "warn")
-                await _reconnect_subtensor(subtensor_ref)
-                raise
-
-        generator_task = asyncio.create_task(
-            generate_samples_continuously(corpus_client, validator_client, openai_client, get_block_with_timeout)
-        )
-
-        def handle_generator_exception(task: asyncio.Task) -> None:
-            """Handle exceptions from the background generator task."""
-            try:
-                exc = task.exception()
-                if exc is not None:
-                    emit_log(f"Background generator task failed: {exc}", "error")
+                await generate_samples_continuously(
+                    corpus_client, validator_client, openai_client, get_block_with_timeout,
+                )
+                # generate_samples_continuously is an infinite loop — returning is unexpected.
+                emit_log(
+                    "Background generator returned without error (unexpected); supervisor exiting",
+                    "warn",
+                )
+                return
             except asyncio.CancelledError:
-                emit_log("Background generator task was cancelled", "warn")
+                emit_log("Background generator cancelled", "warn")
+                raise
+            except Exception as e:
+                uptime = time.time() - start_time
+                if uptime >= healthy_reset_threshold:
+                    backoff = backoff_initial
+                emit_log(
+                    f"Background generator crashed after {uptime:.0f}s: {e}. "
+                    f"Restarting in {backoff:.0f}s...",
+                    "error",
+                )
+                _tb.print_exc()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, backoff_max)
 
-        generator_task.add_done_callback(handle_generator_exception)
+    generator_task = asyncio.create_task(run_generator_supervised())
+
+    def handle_generator_exception(task: asyncio.Task) -> None:
+        """Surface unexpected exits from the supervisor itself (it should run forever)."""
+        try:
+            exc = task.exception()
+            if exc is not None:
+                emit_log(f"Generator supervisor exited with exception: {exc}", "error")
+        except asyncio.CancelledError:
+            emit_log("Generator supervisor was cancelled", "warn")
+
+    generator_task.add_done_callback(handle_generator_exception)
 
     emit_log("Starting weight setting loop...", "start")
     while True:

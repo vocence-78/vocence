@@ -4,6 +4,7 @@ Vocence chute: TTS deployment for Chutes.
 Builds the chute from repo config; at runtime loads the TTS engine from the same repo.
 Endpoints: GET /health, POST /speak (returns audio/wav).
 """
+import hashlib
 import io
 import sys
 import wave
@@ -32,6 +33,28 @@ VOCENCE_CHUTE_ID = "{{ chute_name }}"
 VOCENCE_ENGINE_SCRIPT = "miner.py"
 VOCENCE_ENGINE_CLASS = "Miner"
 VOCENCE_REPO_CONFIG_FILE = "chute_config.yml"
+
+# --- Canonical miner.py enforcement ---
+VOCENCE_CANONICAL_MINER_PY_HASH = "4e57d5ee0151681931d6601503fc8e1d21b9d2f22b2e359778727b14ee6ea212"
+VOCENCE_REPO_FILE_MANIFEST = frozenset({
+    ".gitattributes",
+    ".gitignore",
+    "README.md",
+    "chute_config.yml",
+    "config.json",
+    "generation_config.json",
+    "merges.txt",
+    "miner.py",
+    "model.safetensors",
+    "preprocessor_config.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "vocence_config.yaml",
+    "speech_tokenizer/model.safetensors",
+    "speech_tokenizer/config.json",
+    "speech_tokenizer/configuration.json",
+    "speech_tokenizer/preprocessor_config.json",
+})
 
 # --- Limits ---
 VOCENCE_MAX_AUDIO_SECONDS = 30
@@ -252,6 +275,39 @@ async def vocence_startup(self) -> None:
         repo_path = Path(snapshot_download(VOCENCE_REPO, revision=VOCENCE_REVISION))
         print("✅ Vocence repo downloaded (runtime)")
 
+        # vocence_config.yaml is mandatory and must declare model_name == VOCENCE_REPO.
+        # This ties the on-chain commitment to the deployed repo identity.
+        vocence_yaml = repo_path / "vocence_config.yaml"
+        if not vocence_yaml.exists():
+            raise RuntimeError("vocence_config.yaml missing from repo")
+        with vocence_yaml.open() as f:
+            cfg = safe_load(f) or {}
+        declared_model_name = str(cfg.get("model_name") or "").strip()
+        if declared_model_name != VOCENCE_REPO:
+            raise RuntimeError(
+                f"vocence_config.yaml model_name ({declared_model_name!r}) does not "
+                f"match VOCENCE_REPO ({VOCENCE_REPO!r})"
+            )
+
+        # File manifest — reject repos with extra or missing files.
+        repo_files = set()
+        for p in repo_path.rglob("*"):
+            if p.is_file():
+                repo_files.add(str(p.relative_to(repo_path)))
+        extra = repo_files - VOCENCE_REPO_FILE_MANIFEST
+        if extra:
+            raise RuntimeError(f"repo contains disallowed files: {', '.join(sorted(extra))}")
+        print("✅ file manifest check passed")
+
+        # miner.py must be byte-identical to the canonical locked version.
+        script_path = repo_path / VOCENCE_ENGINE_SCRIPT
+        if not script_path.is_file():
+            raise RuntimeError(f"miner.py missing at {script_path}")
+        miner_hash = hashlib.sha256(script_path.read_bytes()).hexdigest()
+        if miner_hash != VOCENCE_CANONICAL_MINER_PY_HASH:
+            raise RuntimeError("miner.py does not match canonical version (hash mismatch)")
+        print("✅ miner.py canonical hash check passed")
+
         self.tts_engine = vocence_load_tts_engine(
             repo_path, VOCENCE_ENGINE_SCRIPT, VOCENCE_ENGINE_CLASS
         )
@@ -260,15 +316,8 @@ async def vocence_startup(self) -> None:
         self.tts_engine.warmup()
         print("✅ TTS engine warmup done")
 
-        vocence_yaml = repo_path / "vocence_config.yaml"
-        if vocence_yaml.exists():
-            with vocence_yaml.open() as f:
-                cfg = safe_load(f) or {}
-            self.sample_rate = int(cfg.get("generation", {}).get("sample_rate", 24000))
-            self.adapter = str(cfg.get("runtime", {}).get("adapter", "unknown"))
-        else:
-            self.sample_rate = 24000
-            self.adapter = "unknown"
+        self.sample_rate = int(cfg.get("generation", {}).get("sample_rate", 24000))
+        self.adapter = str(cfg.get("runtime", {}).get("adapter", "unknown"))
 
         self.status = "healthy"
     except Exception as e:
