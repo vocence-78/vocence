@@ -341,6 +341,7 @@ async def _compute_and_store_fingerprint(
     model_id: str,
     revision: str,
     safetensors_files: List[Tuple[str, int]],
+    block: int = 0,
 ) -> Optional[str]:
     """Compute per-tensor fingerprint, persist to repo_tensor_fingerprints, return
     the combined model_hash.
@@ -348,9 +349,11 @@ async def _compute_and_store_fingerprint(
     Returns None on permanent failure (parse error, missing file, empty tensors).
     Raises _TransientHFError on transient HF errors so the caller can retry without
     caching the failure. Raises _TensorCollisionError when the newly-computed
-    fingerprint matches any existing DB row at >= TENSOR_NEAR_CLONE_THRESHOLD —
-    the new commit is rejected at audit time; the existing row stays untouched
-    (first-stored-wins).
+    fingerprint matches any existing DB row at >= TENSOR_NEAR_CLONE_THRESHOLD and the
+    existing row has an earlier or equal commit block (earliest-block-wins).
+
+    If the new commit has an earlier block than the colliding row, the existing row
+    is evicted and the new fingerprint is stored instead.
 
     Skips the download if an entry for (model_id, revision) already exists.
     """
@@ -391,12 +394,10 @@ async def _compute_and_store_fingerprint(
         emit_log(f"safetensors had no tensors for {model_id}@{revision}", "warn")
         return None
 
-    # Audit-time DB collision check: scan every stored fingerprint (any miner,
-    # any revision, current or historical). If the new tensors match at or above
-    # TENSOR_NEAR_CLONE_THRESHOLD, reject this commit and do NOT store its
-    # fingerprint — the existing row remains the claimant. **Fail-closed:** a DB
-    # error during the scan re-raises as transient so the audit doesn't accidentally
-    # let a colliding commit through just because the DB was momentarily down.
+    # Audit-time DB collision check: scan every stored fingerprint. If the new
+    # tensors match at >= TENSOR_NEAR_CLONE_THRESHOLD, compare commit blocks:
+    # the miner who committed on-chain earlier wins. If the new commit is earlier,
+    # evict the existing row and store the new one. Fail-closed on DB errors.
     try:
         collision = await fp_repo.find_collision(
             new_tensors=tensors,
@@ -406,19 +407,28 @@ async def _compute_and_store_fingerprint(
     except Exception as e:
         raise _TransientHFError(f"DB error during collision check for {model_id}@{revision}: {e}") from e
     if collision is not None:
-        matched_model, matched_rev, ratio = collision
-        emit_log(
-            f"Tensor collision: {model_id}@{revision} matches existing "
-            f"{matched_model}@{matched_rev[:12]} at ratio={ratio:.3f}; rejecting",
-            "warn",
-        )
-        raise _TensorCollisionError(matched_model, matched_rev, ratio)
+        matched_model, matched_rev, ratio, existing_block = collision
+        if block > 0 and existing_block > 0 and block < existing_block:
+            emit_log(
+                f"Tensor collision: {model_id}@{revision} (block={block}) has earlier "
+                f"block than {matched_model}@{matched_rev[:12]} (block={existing_block}); "
+                f"evicting existing entry",
+                "warn",
+            )
+            await fp_repo.delete(matched_model, matched_rev)
+        else:
+            emit_log(
+                f"Tensor collision: {model_id}@{revision} (block={block}) matches existing "
+                f"{matched_model}@{matched_rev[:12]} (block={existing_block}) at ratio={ratio:.3f}; rejecting",
+                "warn",
+            )
+            raise _TensorCollisionError(matched_model, matched_rev, ratio)
 
-    await fp_repo.upsert(model_id, revision, total_bytes, tensors)
+    await fp_repo.upsert(model_id, revision, total_bytes, tensors, commit_block=block)
     return _model_hash_from_tensors(tensors)
 
 
-async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArtifactAudit]:
+async def audit_repo_artifacts(model_id: str, revision: str, block: int = 0) -> Optional[RepoArtifactAudit]:
     """Run all immutable per-repo checks once and cache by (model_id, revision).
 
     Repo content at a pinned HF sha cannot change, so once we've audited a (repo, sha)
@@ -511,7 +521,7 @@ async def audit_repo_artifacts(model_id: str, revision: str) -> Optional[RepoArt
     # A collision against ANY existing row (regardless of which miner owns it or
     # whether they are still active) blocks the new commit; first-stored wins.
     try:
-        model_hash = await _compute_and_store_fingerprint(model_id, revision, files)
+        model_hash = await _compute_and_store_fingerprint(model_id, revision, files, block=block)
     except _TransientHFError as e:
         emit_log(f"transient HF error computing tensor fingerprint: {e}", "warn")
         return None
@@ -664,7 +674,7 @@ async def validate_miner(
     # Bundled and cached by (model, revision); each unique commit is audited once ever.
     # Revision existence is checked implicitly: any HF call inside the audit raises
     # RevisionNotFoundError if the pinned sha doesn't exist.
-    audit = await audit_repo_artifacts(model_name, model_revision)
+    audit = await audit_repo_artifacts(model_name, model_revision, block=block)
     if audit is None:
         info.invalid_reason = "repo_audit_fetch_failed"
         emit_log(f"uid {uid} ({hotkey[:12]}...): transient HF fetch error, will retry next cycle", "warn")

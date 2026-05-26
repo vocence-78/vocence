@@ -235,6 +235,9 @@ class RepoTensorFingerprint(BaseModel):
     tensor_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # JSON object: {tensor_name: sha256_hex}. See fingerprint_safetensors_file.
     tensors: Mapped[str] = mapped_column(Text, nullable=False)
+    # On-chain commit block of the miner who first stored this fingerprint.
+    # Used by audit-time collision check: earlier block wins.
+    commit_block: Mapped[int] = mapped_column(BigInteger, nullable=True, default=0)
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
