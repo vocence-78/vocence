@@ -42,6 +42,7 @@ class RepoTensorFingerprintRepository:
         model_revision: str,
         total_bytes: int,
         tensors: Dict[str, str],
+        commit_block: int = 0,
     ) -> None:
         """Insert or replace the fingerprint row for (model, revision)."""
         payload = json.dumps(tensors, sort_keys=True, separators=(",", ":"))
@@ -55,11 +56,13 @@ class RepoTensorFingerprintRepository:
                         total_bytes=int(total_bytes),
                         tensor_count=len(tensors),
                         tensors=payload,
+                        commit_block=commit_block,
                     ))
                 else:
                     existing.total_bytes = int(total_bytes)
                     existing.tensor_count = len(tensors)
                     existing.tensors = payload
+                    existing.commit_block = commit_block
         except Exception as e:
             emit_log(f"tensor fingerprint upsert failed for {model_name}@{model_revision}: {e}", "warn")
 
@@ -91,25 +94,21 @@ class RepoTensorFingerprintRepository:
         new_tensors: Dict[str, str],
         exclude_key: Tuple[str, str],
         threshold: float,
-    ) -> Optional[Tuple[str, str, float]]:
+    ) -> Optional[Tuple[str, str, float, int]]:
         """Find the first stored fingerprint whose tensor match ratio against
         `new_tensors` is at or above `threshold`.
 
         Used as the audit-time block: a new (model, revision) whose tensors collide
         with anything already stored — regardless of which miner owns the existing
-        row or whether that miner is still active — gets rejected.
+        row or whether that miner is still active — gets rejected unless the new
+        commit has an earlier block (earlier block wins).
 
         Ratio is computed as `count(matching tensor hashes) / len(new_tensors)`. Rows
         keyed by `exclude_key` (the new commit itself, in case it's already stored)
         and rows with empty tensor dicts are skipped.
 
-        Returns (matched_model_name, matched_revision, ratio) on the first match, or
-        None if there was no match and the scan completed cleanly.
-
-        **Fail-closed:** if the DB query itself errors out, the exception is re-raised
-        so the caller can treat the audit as inconclusive and retry. We do NOT swallow
-        the error and return None, since that would let a colliding commit pass the
-        collision check just because the DB was momentarily unreachable.
+        Returns (matched_model_name, matched_revision, ratio, commit_block) on the
+        first match, or None if no match.
         """
         if not new_tensors:
             return None
@@ -128,5 +127,15 @@ class RepoTensorFingerprintRepository:
                 matching = sum(1 for k, v in new_tensors.items() if existing.get(k) == v)
                 ratio = matching / len(new_tensors)
                 if ratio >= threshold:
-                    return (row.model_name, row.model_revision, ratio)
+                    return (row.model_name, row.model_revision, ratio, row.commit_block or 0)
         return None
+
+    async def delete(self, model_name: str, model_revision: str) -> None:
+        """Remove a fingerprint row. Used when an earlier-block miner evicts an existing entry."""
+        try:
+            async with acquire_session() as session:
+                row = await session.get(RepoTensorFingerprint, (model_name, model_revision))
+                if row is not None:
+                    await session.delete(row)
+        except Exception as e:
+            emit_log(f"tensor fingerprint delete failed for {model_name}@{model_revision}: {e}", "warn")
