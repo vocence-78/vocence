@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -15,6 +14,7 @@ from vocence.domain.config import (
     MIN_VALIDATOR_APPEARANCES_FOR_ELIGIBILITY,
     OWNER_HOTKEY,
     THRESHOLD_MARGIN,
+    VALIDATOR_WEIGHT_EXPONENT,
 )
 from vocence.domain.entities import ParticipantInfo
 from vocence.ranking.calculator import calculate_scores_from_samples
@@ -126,7 +126,7 @@ def aggregate_global_scores(
     """Aggregate per-validator miner win rates into one global weighted score."""
     aggregated: Dict[str, Dict[str, Any]] = {}
     base_weights = {
-        hotkey: math.sqrt(max(0.0, validator_stakes.get(hotkey, 0.0)))
+        hotkey: max(0.0, validator_stakes.get(hotkey, 0.0)) ** VALIDATOR_WEIGHT_EXPONENT
         for hotkey in bucket_scores.keys()
     }
     has_positive_weight = any(weight > 0 for weight in base_weights.values())
@@ -397,7 +397,7 @@ def build_global_scoring_snapshot(
                 "bucket_name": cfg.bucket_name,
                 "label": short_bucket_label(cfg.bucket_name),
                 "stake": stake,
-                "weight": math.sqrt(max(0.0, stake)),
+                "weight": max(0.0, stake) ** VALIDATOR_WEIGHT_EXPONENT,
             }
         )
 

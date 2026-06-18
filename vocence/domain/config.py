@@ -56,6 +56,11 @@ COMMIT_LOCK_BLOCK = int(os.environ.get("COMMIT_LOCK_BLOCK", "8270310"))
 MAX_POST_CUTOVER_COMMITS = int(os.environ.get("MAX_POST_CUTOVER_COMMITS", "2"))
 # Most recent N evaluations used for scoring (validator S3 + owner metrics). Default 50.
 MAX_EVALS_FOR_SCORING = int(os.environ.get("MAX_EVALS_FOR_SCORING", "50"))
+# Exponent applied to validator stake to derive its weight in global scoring:
+# weight = stake ** VALIDATOR_WEIGHT_EXPONENT. Lower exponent compresses the gap
+# between large- and small-stake validators (0.5 = sqrt, 0.25 = fourth root,
+# 1.0 = linear). Default 0.25 keeps stake ordering while tightening influence spread.
+VALIDATOR_WEIGHT_EXPONENT = float(os.environ.get("VALIDATOR_WEIGHT_EXPONENT", "0.25"))
 
 # Chutes API configuration
 CHUTES_BASE_URL = os.environ.get("CHUTES_BASE_URL", "https://api.chutes.ai")
