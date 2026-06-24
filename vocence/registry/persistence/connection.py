@@ -7,6 +7,7 @@ Provides async connection pool management using SQLAlchemy with asyncpg.
 from typing import Optional, AsyncGenerator
 from contextlib import asynccontextmanager
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
     AsyncSession,
@@ -31,18 +32,26 @@ _db_engine: Optional[AsyncEngine] = None
 _db_session_maker: Optional[async_sessionmaker[AsyncSession]] = None
 
 
+def _is_sqlite(connection_string: str) -> bool:
+    return connection_string.startswith("sqlite")
+
+
 def build_connection_string() -> str:
     """Build database connection URL from config (env with defaults).
-    
-    Supports both DB_CONNECTION_STRING and individual components.
-    
+
+    Supports DB_CONNECTION_STRING (postgresql:// or sqlite://) and individual
+    Postgres components. The owner API uses Postgres; validators pass an explicit
+    sqlite DSN to establish_connection() for their local registry.
+
     Returns:
-        PostgreSQL connection URL with asyncpg driver
+        Connection URL with the appropriate async driver.
     """
     if DB_CONNECTION_STRING:
         db_url = DB_CONNECTION_STRING
         if db_url.startswith("postgresql://"):
             db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        elif db_url.startswith("sqlite://") and "+aiosqlite" not in db_url:
+            db_url = db_url.replace("sqlite://", "sqlite+aiosqlite://", 1)
         return db_url
     return f"postgresql+asyncpg://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
 
@@ -67,16 +76,34 @@ async def establish_connection(connection_string: Optional[str] = None) -> Async
         connection_string = build_connection_string()
     
     emit_log(f"Establishing database connection: {connection_string.split('@')[-1]}", "info")
-    
-    _db_engine = create_async_engine(
-        connection_string,
-        pool_size=10,
-        max_overflow=20,
-        pool_recycle=3600,
-        pool_pre_ping=True,
-        echo=DATABASE_ECHO,
-    )
-    
+
+    if _is_sqlite(connection_string):
+        # SQLite (validator local registry): no server-style pool args; enable WAL so
+        # the registry writer and the generator/weight-setter readers don't block each
+        # other, and a busy_timeout so brief write contention retries instead of erroring.
+        _db_engine = create_async_engine(
+            connection_string,
+            pool_pre_ping=True,
+            echo=DATABASE_ECHO,
+        )
+
+        @event.listens_for(_db_engine.sync_engine, "connect")
+        def _set_sqlite_pragma(dbapi_conn, _record):  # noqa: ANN001
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA busy_timeout=30000")
+            cur.execute("PRAGMA synchronous=NORMAL")
+            cur.close()
+    else:
+        _db_engine = create_async_engine(
+            connection_string,
+            pool_size=10,
+            max_overflow=20,
+            pool_recycle=3600,
+            pool_pre_ping=True,
+            echo=DATABASE_ECHO,
+        )
+
     _db_session_maker = async_sessionmaker(
         _db_engine,
         class_=AsyncSession,
@@ -181,9 +208,13 @@ async def initialize_schema() -> None:
     engine = get_connection_engine()
     async with engine.begin() as conn:
         await conn.run_sync(BaseModel.metadata.create_all)
-    
-    await ensure_evaluation_audio_columns()
-    await ensure_evaluation_score_columns()
+
+    # The ADD COLUMN IF NOT EXISTS migrations are Postgres-only (for DBs created
+    # before those columns existed). SQLite doesn't support that syntax, and a fresh
+    # SQLite DB already gets every column from create_all above, so skip them there.
+    if engine.dialect.name != "sqlite":
+        await ensure_evaluation_audio_columns()
+        await ensure_evaluation_score_columns()
     emit_log("Database schema initialized", "success")
 
 
