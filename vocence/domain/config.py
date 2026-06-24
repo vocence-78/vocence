@@ -164,6 +164,19 @@ LOG_DIR = os.environ.get("LOG_DIR", "logs")
 PARTICIPANT_VALIDATION_INTERVAL = int(os.environ.get("PARTICIPANT_VALIDATION_INTERVAL", "3600"))
 METRICS_CALCULATION_INTERVAL = int(os.environ.get("METRICS_CALCULATION_INTERVAL", "1800"))
 
+# Local miner registry (validators validate miners themselves instead of calling the
+# owner API). When enabled, each validator runs the same validation pipeline on a
+# schedule, stores results in a local SQLite DB, and reads valid miners from it.
+USE_LOCAL_REGISTRY = (os.environ.get("USE_LOCAL_REGISTRY", "true").lower() == "true")
+REGISTRY_DB_PATH = os.environ.get("REGISTRY_DB_PATH", os.path.join(os.getcwd(), "data", "registry.sqlite"))
+# Blacklist stays centralized; validators fetch it from the owner API and cache it on
+# disk so a brief API outage doesn't change their valid-miner set (fail to last-known).
+BLOCKLIST_CACHE_PATH = os.environ.get("BLOCKLIST_CACHE_PATH", os.path.join(os.getcwd(), "data", "blocklist_cache.json"))
+# Active-validator detection at weight-set time: a peer validator counts as active if
+# its bucket has a fresh eval (within ACTIVE_VALIDATOR_WINDOW_HOURS of now) and it is on
+# the metagraph with stake >= ACTIVE_VALIDATOR_MIN_STAKE.
+ACTIVE_VALIDATOR_MIN_STAKE = float(os.environ.get("ACTIVE_VALIDATOR_MIN_STAKE", "0"))
+
 # Auth (owner API)
 SIGNATURE_EXPIRY_SECONDS = int(os.environ.get("SIGNATURE_EXPIRY_SECONDS", "300"))
 ADMIN_HOTKEYS = [x.strip() for x in os.environ.get("ADMIN_HOTKEYS", "").split(",") if x.strip()]

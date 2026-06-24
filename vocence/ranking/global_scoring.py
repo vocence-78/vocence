@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from vocence.adapters.storage import create_custom_storage_client
 from vocence.domain.config import (
@@ -72,6 +72,81 @@ def select_active_bucket_configs(
             continue
         selected.append(cfg)
     return selected, missing
+
+
+def _newest_eval_age_seconds_sync(client: Any, bucket_name: str) -> Optional[float]:
+    """Age in seconds of the newest evaluation in a bucket, or None if empty/unknown.
+
+    Evaluation prefixes are timestamps ``YYYY-MM-DD_HH-MM-SS`` (lexicographically
+    sortable). Uses a non-recursive listing so only the top-level eval prefixes are
+    read, not every object. Tolerates clock skew because the freshness window is wide.
+    """
+    try:
+        objs = list(client.list_objects(bucket_name, recursive=False))
+    except Exception:
+        return None
+    newest: Optional[str] = None
+    for o in objs:
+        prefix = (getattr(o, "object_name", "") or "").rstrip("/").split("/")[0]
+        if not prefix:
+            continue
+        if newest is None or prefix > newest:
+            newest = prefix
+    if newest is None:
+        return None
+    try:
+        dt = datetime.strptime(newest, "%Y-%m-%d_%H-%M-%S")
+    except ValueError:
+        return None
+    return (datetime.now() - dt).total_seconds()
+
+
+async def determine_active_bucket_configs(
+    bucket_configs: List[ValidatorBucketConfig],
+    validator_stakes: Dict[str, float],
+    freshness_seconds: float,
+    min_stake: float = 0.0,
+) -> Tuple[List[ValidatorBucketConfig], List[dict]]:
+    """Decide which validators are active *locally*, replacing the owner API's
+    /validators/active. A peer validator is active when it is on the metagraph with
+    stake >= min_stake AND its bucket has an evaluation fresher than freshness_seconds.
+
+    Returns (active_configs, events) where events are log-friendly dicts.
+    """
+
+    async def check(cfg: ValidatorBucketConfig):
+        stake = validator_stakes.get(cfg.hotkey)
+        if stake is None:
+            return (cfg, False, "not_on_metagraph")
+        if stake < min_stake:
+            return (cfg, False, f"stake_below_floor:{stake:.2f}")
+        client = create_custom_storage_client(cfg.access_key, cfg.secret_key)
+        age = await asyncio.to_thread(_newest_eval_age_seconds_sync, client, cfg.bucket_name)
+        if age is None:
+            return (cfg, False, "no_evals")
+        if age > freshness_seconds:
+            return (cfg, False, f"stale:{age / 3600:.1f}h")
+        return (cfg, True, f"active:{age / 3600:.1f}h")
+
+    results = await asyncio.gather(*[check(c) for c in bucket_configs], return_exceptions=True)
+    active: List[ValidatorBucketConfig] = []
+    events: List[dict] = []
+    for r in results:
+        if isinstance(r, Exception):
+            events.append({"level": "warn", "message": str(r)})
+            continue
+        cfg, is_active, reason = r
+        events.append(
+            {
+                "level": "info" if is_active else "warn",
+                "hotkey": cfg.hotkey,
+                "bucket_name": cfg.bucket_name,
+                "reason": reason,
+            }
+        )
+        if is_active:
+            active.append(cfg)
+    return active, events
 
 
 async def collect_validator_bucket_scores(
