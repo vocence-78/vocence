@@ -110,6 +110,21 @@ Use `docker compose` (with a space) as in this guide; it’s the Compose V2 plug
 
    If you already started the stack and `logs/` is empty, run the same two commands and then `docker compose restart validator`.
 
+6. **Create the local audio corpus directory.** Each validator builds its own source-audio corpus on disk (English LibriVox clips, 20–25s) — there is no shared corpus bucket. The compose file mounts `./data/corpus` into the container at `/app/data/corpus`. **Pre-create it before the first `docker compose up -d`** — otherwise Docker creates the bind-mount path as `root`, and the container (user `validator`, uid 1000) cannot write to it, so the corpus silently never fills and sample generation starves:
+
+   ```bash
+   mkdir -p data/corpus
+   sudo chown -R 1000:1000 data/corpus
+   ```
+
+   If you already started the stack and the corpus is empty (logs show repeated `Corpus round failed ... Permission denied`), run the same two commands and then `docker compose restart validator`.
+
+   Notes:
+
+   - **Disk:** the corpus holds up to `AUDIO_CORPUS_MAX_ENTRIES` clips (default 10,000) at ~1.1 MB each, so budget roughly **~12 GB** of free disk for `data/corpus`. Lower `AUDIO_CORPUS_MAX_ENTRIES` if disk is tight.
+   - **Warm-up:** the corpus fills in the background (~10 clips/minute at defaults, so a few hours to reach the cap). Until enough clips exist, the generator waits between sample slots — this is expected on a fresh validator.
+   - The mount persists the corpus across restarts/updates, so this download happens only once.
+
 ---
 
 ## 2. Run with Docker Compose
@@ -187,6 +202,7 @@ The validator service has a healthcheck; Docker will report its status in `docke
 | Logs (stream) | `docker compose logs -f validator` |
 | Logs (daily files) | `logs/vocence_YYYY-MM-DD.log` in the project directory. |
 | Config | `.env` (including `VALIDATOR_BUCKETS_JSON`) and `~/.bittensor/wallets` on the host. |
+| Local corpus | Pre-create `data/corpus` (`chown 1000:1000`); ~12 GB disk; fills automatically over a few hours. |
 
 For the full CI/CD flow (how the image is built and published), see [cicd-pipeline.md](cicd-pipeline.md). For CLI options (e.g. split generator vs weight setter if you run without Docker), see [CLI.md](CLI.md).
 
@@ -199,3 +215,9 @@ For the full CI/CD flow (how the image is built and published), see [cicd-pipeli
 
 - **"Keyfile at: .../owner_hotkey does not exist" (wallet in /root/.bittensor/wallets)**  
   The wallet is mounted correctly, but the container runs as user `validator` (uid 1000). If the wallet on the host is under root’s home and owned by root, the container cannot read it (and may report “does not exist”). On the host run: `sudo chown -R 1000:1000 /root/.bittensor/wallets`, then `docker compose restart validator`.
+
+- **Corpus never fills / logs show "Corpus round failed ... Permission denied"**  
+  The `./data/corpus` bind-mount was created by Docker as `root`, so the container (uid 1000) cannot write clips into it. On the host run: `mkdir -p data/corpus && sudo chown -R 1000:1000 data/corpus`, then `docker compose restart validator`. The corpus then fills over the next few hours.
+
+- **Generator keeps logging "No corpus clip available yet (corpus still filling?)"**  
+  Normal on a fresh validator — the local corpus is still downloading. It resolves once enough clips exist. If it persists for many hours, check disk space for `data/corpus` and the permission note above.
