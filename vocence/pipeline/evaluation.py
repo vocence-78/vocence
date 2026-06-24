@@ -409,13 +409,15 @@ async def compare_naturalness_async(
     source_audio_path: str,
     miner_audio_path: str,
     task_description: str,
-) -> Dict[str, Any]:
+) -> Optional[Dict[str, Any]]:
     """Pairwise judge: does the miner audio sound more natural than the source?
 
     Randomizes presentation order to neutralize first/second position bias.
 
     Returns:
-        {"miner_more_natural": bool, "reasoning": str, "presentation_order": str}
+        {"miner_more_natural": bool, "reasoning": str, "presentation_order": str},
+        or None if the judge call failed (the element is then skipped/renormalized,
+        rather than counted as a loss against the miner).
     """
     judge = _get_judge()
     swap = random.choice([True, False])
@@ -443,19 +445,19 @@ async def compare_naturalness_async(
             ),
         )
     except Exception as e:
-        emit_log(f"Naturalness pairwise failed ({e}), counting as loss", "warn")
-        return {
-            "miner_more_natural": False,
-            "reasoning": f"error: {str(e)[:160]}",
-            "presentation_order": f"{'miner' if swap else 'source'} first",
-        }
+        # Judge failure is our fault, not the miner's — return None so the
+        # naturalness element is skipped and remaining weights renormalize
+        # (neutral), rather than penalizing the miner with an auto-loss.
+        emit_log(f"Naturalness pairwise failed ({e}); skipping element (neutral)", "warn")
+        return None
 
     if not result.get("success"):
-        return {
-            "miner_more_natural": False,
-            "reasoning": (result.get("error") or "judge call failed")[:160],
-            "presentation_order": f"{'miner' if swap else 'source'} first",
-        }
+        emit_log(
+            f"Naturalness judge returned no result ({(result.get('error') or 'judge call failed')[:120]}); "
+            f"skipping element (neutral)",
+            "warn",
+        )
+        return None
 
     response_text = (result.get("response") or "").strip()
     first_line = response_text.split("\n", 1)[0].strip().upper() if response_text else ""
