@@ -70,7 +70,7 @@ Vocence integrates with other Bittensor infrastructure, including:
 
 - **Bittensor:** `NETWORK`, `NETUID`, `WALLET_NAME`, `HOTKEY_NAME` (to run the validator and set weights).
 - **Chutes:** `CHUTES_API_KEY` (or `CHUTES_AUTH_KEY`) — **must be granted by the Vocence team** so your validator is allowed to call miners' chutes.
-- **Hippius:** `HIPPIUS_CORPUS_*` (read-only corpus, from owner); `HIPPIUS_VALIDATOR_*` (your own bucket for evaluation samples).
+- **Hippius:** `HIPPIUS_VALIDATOR_*` (your own bucket for evaluation samples). Source audio is downloaded to a local corpus automatically (`CORPUS_LOCAL_DIR`) — no corpus bucket credentials needed.
 - **Validator bucket config:** `VALIDATOR_BUCKETS_JSON` in `.env`, containing readonly bucket credentials for every validator you may score against (`hotkey`, `bucket_name`, `access_key`, `secret_key`).
 - **Owner API:** `API_URL` — endpoint of the Vocence owner service (miners, blocklist, evaluations, active validators, dashboard). **Provided by the Vocence team**
 
@@ -127,7 +127,7 @@ Weight setting is now **global and deterministic**:
 - Validators fetch the current **active validator list** from the owner API. A validator is considered active when it submitted evaluation data recently (default window: 24 hours).
 - Validators load local readonly bucket credentials from `VALIDATOR_BUCKETS_JSON` in `.env`.
 - For each active validator that also exists in `VALIDATOR_BUCKETS_JSON`, validators read the most recent scoring window from that validator's bucket (default: 50 evaluations).
-- Miner win rates are aggregated across active validators using **stake-weighted scoring**, where each validator's influence is weighted by `sqrt(stake)` from the current metagraph.
+- Miner win rates are aggregated across active validators using **stake-weighted scoring**, where each validator's influence is weighted by `stake ** 0.25` (fourth-root of stake, configurable via `VALIDATOR_WEIGHT_EXPONENT`) from the current metagraph.
 - A miner is globally eligible only if it has more than **40 evaluations** in at least **3 active validator buckets**.
 - The winner must still beat earlier eligible miners, including the owner base model when present, by `THRESHOLD_MARGIN`.
 - If there are too few active validators, too few readable validator buckets, or no miner satisfies the consensus + margin rules, validators burn by setting weight `1.0` on UID `0`.

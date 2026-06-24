@@ -6,7 +6,7 @@ This guide covers running a Vocence validator using **Docker** and **Watchtower*
 
 ## Prerequisites
 
-- **From the Vocence team:** Chutes permission, owner API URL (`API_URL`), Hippius corpus + validator keys, and readonly validator-bucket credentials for the active validator set.
+- **From the Vocence team:** Chutes permission, owner API URL (`API_URL`), Hippius validator bucket keys (for your own samples), and readonly validator-bucket credentials for the active validator set. (No corpus-bucket keys needed — source audio is built locally.)
 - **Your side:** Bittensor wallet (coldkey + hotkey), Docker and Docker Compose installed.
 
 ---
@@ -131,7 +131,7 @@ The validator still generates its own samples locally, but final weight setting 
 - The owner API returns the current active validator list.
 - Your validator intersects that active-validator list with `VALIDATOR_BUCKETS_JSON`.
 - For each matching validator bucket, it reads the recent scoring window (default 50 evaluations).
-- It computes a global miner win rate using stake-weighted aggregation (`sqrt(stake)`).
+- It computes a global miner win rate using stake-weighted aggregation (`stake ** 0.25`, fourth-root; configurable via `VALIDATOR_WEIGHT_EXPONENT`).
 - A miner must have more than 40 evaluations in at least 3 active validator buckets to be globally eligible.
 - The winner must still beat earlier eligible miners and the owner base model by the configured threshold margin.
 - If active validator coverage is too low or no miner satisfies the rules, the validator burns for that cycle.

@@ -1,7 +1,7 @@
 """
 CLI interface for Vocence.
 
-Provides commands for running the validator, owner (API + source downloader),
+Provides commands for running the validator, the HTTP API (dashboard/metrics),
 miner (push/commit), and queries.
 
 When you add or change commands or options, update the CLI reference:
