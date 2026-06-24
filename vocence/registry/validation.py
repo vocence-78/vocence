@@ -8,6 +8,7 @@ and detecting duplicate/plagiarized models.
 import os
 import asyncio
 import hashlib
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -367,28 +368,35 @@ async def _compute_and_store_fingerprint(
 
     tensors: Dict[str, str] = {}
     total_bytes = 0
-    for filename, size in safetensors_files:
-        try:
-            path = await asyncio.to_thread(
-                hf_hub_download,
-                repo_id=model_id,
-                filename=filename,
-                revision=revision,
-                repo_type="model",
-                token=HF_AUTH_TOKEN or None,
-            )
-        except (EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError) as e:
-            emit_log(f"safetensors {filename} missing in {model_id}@{revision}: {e}", "warn")
-            return None
-        except Exception as e:
-            raise _TransientHFError(f"download {filename}: {e}") from e
-        try:
-            per_file = await asyncio.to_thread(fingerprint_safetensors_file, path)
-        except Exception as e:
-            emit_log(f"safetensors parse failed for {filename}: {e}", "warn")
-            return None
-        tensors.update(per_file)
-        total_bytes += size
+    # Download into a throwaway cache dir so the (multi-GB) safetensors are deleted
+    # right after fingerprinting instead of accumulating in the global HF cache
+    # forever. We only need each tensor's hash once; the result is persisted in the
+    # DB and re-download is skipped on the early-return above, so a per-call temp
+    # cache costs nothing and keeps validator disk usage bounded.
+    with tempfile.TemporaryDirectory(prefix="vocence_fp_") as tmp_cache:
+        for filename, size in safetensors_files:
+            try:
+                path = await asyncio.to_thread(
+                    hf_hub_download,
+                    repo_id=model_id,
+                    filename=filename,
+                    revision=revision,
+                    repo_type="model",
+                    token=HF_AUTH_TOKEN or None,
+                    cache_dir=tmp_cache,
+                )
+            except (EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError) as e:
+                emit_log(f"safetensors {filename} missing in {model_id}@{revision}: {e}", "warn")
+                return None
+            except Exception as e:
+                raise _TransientHFError(f"download {filename}: {e}") from e
+            try:
+                per_file = await asyncio.to_thread(fingerprint_safetensors_file, path)
+            except Exception as e:
+                emit_log(f"safetensors parse failed for {filename}: {e}", "warn")
+                return None
+            tensors.update(per_file)
+            total_bytes += size
 
     if not tensors:
         emit_log(f"safetensors had no tensors for {model_id}@{revision}", "warn")
