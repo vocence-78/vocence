@@ -26,6 +26,7 @@ import tempfile
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from vocence.shared.logging import emit_log
@@ -34,12 +35,22 @@ from vocence.domain.config import (
     AUDIO_CORPUS_MAX_ENTRIES,
     AUDIO_SOURCE_MAX_DURATION_SEC,
     SOURCE_AUDIO_DOWNLOAD_INTERVAL,
+    CORPUS_REFRESH_INTERVAL_SEC,
+    CORPUS_RATE_LIMIT_BACKOFF_SEC,
     LIBRIVOX_CLIPS_PER_CHAPTER,
     LIBRIVOX_CLIP_MIN_SEC,
     LIBRIVOX_CLIP_MAX_SEC,
     USED_AUDIO_FILES,
     MAX_AUDIO_HISTORY,
 )
+
+
+class CorpusRateLimited(Exception):
+    """Raised when LibriVox returns HTTP 429; carries an optional retry-after (seconds)."""
+
+    def __init__(self, retry_after: Optional[float] = None):
+        super().__init__("LibriVox rate limited (HTTP 429)")
+        self.retry_after = retry_after
 
 # ---------------------------------------------------------------------------
 # LibriVox fetch + ffmpeg clip extraction (English-only, public domain audio).
@@ -92,12 +103,28 @@ def _pick_random_chapter_sync(
     min_duration_sec: float,
     max_attempts: int = 20,
 ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
-    """Pick a random English book and chapter with at least min_duration_sec."""
+    """Pick a random English book and chapter with at least min_duration_sec.
+
+    Raises CorpusRateLimited if LibriVox returns HTTP 429 so the caller can back off.
+    Other transient fetch errors just skip to the next attempt (different offset).
+    """
     for _ in range(max_attempts):
         offset = rng.randint(0, 500) * 50
-        books = _fetch_audiobooks_sync(limit=50, offset=offset)
-        if not books and offset > 0:
-            books = _fetch_audiobooks_sync(limit=50, offset=0)
+        try:
+            books = _fetch_audiobooks_sync(limit=50, offset=offset)
+            if not books and offset > 0:
+                books = _fetch_audiobooks_sync(limit=50, offset=0)
+        except HTTPError as e:
+            if e.code == 429:
+                retry_after = None
+                try:
+                    retry_after = float(e.headers.get("Retry-After")) if e.headers else None
+                except (TypeError, ValueError):
+                    retry_after = None
+                raise CorpusRateLimited(retry_after) from e
+            continue  # other HTTP error: try a different offset
+        except Exception:
+            continue  # transient network/parse error: try a different offset
         if not books:
             continue
         books_en = [b for b in books if (b.get("language") or "").strip().lower() == "english"]
@@ -227,29 +254,53 @@ def _download_one_batch_local_sync() -> int:
             pass
 
 
+def _jittered(seconds: float) -> float:
+    """Add up to +25% random jitter so independent validators don't sync their pulls."""
+    return seconds * (1.0 + random.random() * 0.25)
+
+
 async def run_corpus_manager() -> None:
     """Continuous background loop: keep the local corpus topped up and pruned to cap.
 
-    Mirrors the previous owner downloader cadence: one chapter per round every
-    SOURCE_AUDIO_DOWNLOAD_INTERVAL seconds. Runs until cancelled.
+    Cadence is load-aware so we don't hammer LibriVox (a free service), which matters
+    now that every validator runs this independently:
+      - BELOW cap  -> pull every SOURCE_AUDIO_DOWNLOAD_INTERVAL s (fill fast).
+      - AT cap     -> pull every CORPUS_REFRESH_INTERVAL_SEC s (slow freshness rotation).
+      - On HTTP 429 -> exponential backoff up to CORPUS_RATE_LIMIT_BACKOFF_SEC.
+    All sleeps are jittered. Runs until cancelled.
     """
     _ensure_dir()
     emit_log(
         f"Local corpus manager starting (dir={CORPUS_LOCAL_DIR}, cap={AUDIO_CORPUS_MAX_ENTRIES} clips, "
-        f"clips/round={LIBRIVOX_CLIPS_PER_CHAPTER}, interval={SOURCE_AUDIO_DOWNLOAD_INTERVAL}s, "
+        f"fill_interval={SOURCE_AUDIO_DOWNLOAD_INTERVAL}s, refresh_interval={CORPUS_REFRESH_INTERVAL_SEC}s, "
         f"current={corpus_count()})",
         "start",
     )
+    rate_limit_backoff = 0.0
     while True:
+        at_cap = corpus_count() >= AUDIO_CORPUS_MAX_ENTRIES
         try:
             await asyncio.to_thread(_download_one_batch_local_sync)
             await asyncio.to_thread(_prune_to_limit)
+            rate_limit_backoff = 0.0  # success: clear any backoff
         except asyncio.CancelledError:
             emit_log("Local corpus manager cancelled", "warn")
             raise
+        except CorpusRateLimited as e:
+            base = e.retry_after or (rate_limit_backoff * 2 if rate_limit_backoff else 60.0)
+            rate_limit_backoff = min(max(base, 60.0), CORPUS_RATE_LIMIT_BACKOFF_SEC)
+            emit_log(
+                f"LibriVox rate-limited; backing off {rate_limit_backoff:.0f}s before next pull",
+                "warn",
+            )
+            await asyncio.sleep(_jittered(rate_limit_backoff))
+            continue
         except Exception as e:
             emit_log(f"Corpus round failed ({e}); retrying next interval", "warn")
-        await asyncio.sleep(SOURCE_AUDIO_DOWNLOAD_INTERVAL)
+
+        # Full corpus -> slow maintenance rotation; still filling -> fast cadence.
+        interval = CORPUS_REFRESH_INTERVAL_SEC if at_cap else SOURCE_AUDIO_DOWNLOAD_INTERVAL
+        await asyncio.sleep(_jittered(interval))
 
 
 def select_local_audio() -> Optional[str]:

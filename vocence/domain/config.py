@@ -243,7 +243,13 @@ AUDIO_CORPUS_MAX_ENTRIES = int(os.environ.get("AUDIO_CORPUS_MAX_ENTRIES", "10000
 # Local corpus directory: each validator maintains its own source-audio corpus on disk
 # (English LibriVox clips, 20-25s) instead of reading from a shared S3 corpus bucket.
 CORPUS_LOCAL_DIR = os.environ.get("CORPUS_LOCAL_DIR", os.path.join(os.getcwd(), "data", "corpus"))
-SOURCE_AUDIO_DOWNLOAD_INTERVAL = int(os.environ.get("SOURCE_AUDIO_DOWNLOAD_INTERVAL", "60"))  # Seconds between rounds
+# Download cadence. While BELOW the cap, pull a chapter every SOURCE_AUDIO_DOWNLOAD_INTERVAL
+# seconds to fill quickly. Once AT the cap, switch to a slow freshness rotation every
+# CORPUS_REFRESH_INTERVAL_SEC seconds so we don't hammer LibriVox (a free service) forever.
+SOURCE_AUDIO_DOWNLOAD_INTERVAL = int(os.environ.get("SOURCE_AUDIO_DOWNLOAD_INTERVAL", "60"))  # fill mode (below cap)
+CORPUS_REFRESH_INTERVAL_SEC = int(os.environ.get("CORPUS_REFRESH_INTERVAL_SEC", "3600"))  # maintenance mode (at cap)
+# Backoff (seconds) applied when LibriVox rate-limits us (HTTP 429); doubles up to this cap.
+CORPUS_RATE_LIMIT_BACKOFF_SEC = int(os.environ.get("CORPUS_RATE_LIMIT_BACKOFF_SEC", "900"))
 LIBRIVOX_CLIPS_PER_CHAPTER = int(os.environ.get("LIBRIVOX_CLIPS_PER_CHAPTER", "10"))
 LIBRIVOX_CLIP_MIN_SEC = int(os.environ.get("LIBRIVOX_CLIP_MIN_SEC", "20"))
 LIBRIVOX_CLIP_MAX_SEC = int(os.environ.get("LIBRIVOX_CLIP_MAX_SEC", "25"))
