@@ -100,33 +100,13 @@ Use `docker compose` (with a space) as in this guide; it’s the Compose V2 plug
    - Validators use this env var together with the owner API's active-validator list to decide which buckets to score from each cycle.
    - These credentials are sensitive and should stay only in `.env` or your secret manager.
 
-> **Why the `chown 1000:1000` steps below?** The container does **not** run as root — it runs as an internal user called `validator` whose numeric ID is **1000** (set in the image for safety). Docker maps mounted-folder permissions by **number**, not name: a host folder owned by `root` is *not writable* by the in-container `validator` (uid 1000). So any host directory the validator must write to — logs, the audio corpus, etc. — has to be owned by uid 1000 on the host. That's all `sudo chown -R 1000:1000 <dir>` does. Pre-create these dirs **before** the first `docker compose up -d`; if Docker auto-creates a missing mount path it makes it `root`-owned and the container silently can't write.
+> **Permissions are handled automatically.** The container starts as root only long enough to make its state dirs (`./data`, `./logs`) writable, then drops to an unprivileged `validator` user. You do **not** need to `chown` anything for `./data`/`./logs` — just `docker compose up -d`. (The one exception is the **wallet** mount, which is read-only, so the container can't fix its permissions — see step 4.)
 
-4. **Bittensor wallets** must be available at `~/.bittensor/wallets` on the host (coldkey and hotkey). The compose file mounts this directory into the container at `/home/validator/.bittensor/wallets` (read-only) so the app finds `~/.bittensor/wallets` when running as the validator user. If the wallet lives under **root’s home** (e.g. `/root/.bittensor/wallets`), the container user (uid 1000) must be able to read it—on the host run: `sudo chown -R 1000:1000 /root/.bittensor/wallets`.
+4. **Bittensor wallets** must be available at `~/.bittensor/wallets` on the host (coldkey and hotkey). The compose file mounts this directory into the container at `/home/validator/.bittensor/wallets` (read-only). Because it's read-only, the container can't adjust its permissions: if the wallet lives under **root’s home** (e.g. `/root/.bittensor/wallets`), make it readable by uid 1000 on the host — `sudo chown -R 1000:1000 /root/.bittensor/wallets`.
 
-5. **Create the logs directory** so the container can write daily log files. The validator runs as user `validator` (uid 1000); if `./logs` is created by Docker on first run, it is owned by root and the container cannot write. Do this once before the first `docker compose up -d`:
+5. **Disk.** `./data` (created automatically) holds the local audio corpus, the miner-registry SQLite DB, and the cached blacklist. The corpus holds up to `AUDIO_CORPUS_MAX_ENTRIES` clips (default 10,000) at ~1.1 MB each, so budget roughly **~12 GB** of free disk; the DB and blacklist cache are tiny. Lower `AUDIO_CORPUS_MAX_ENTRIES` if disk is tight. Logs are written to `./logs/vocence_YYYY-MM-DD.log`.
 
-   ```bash
-   mkdir -p logs
-   sudo chown 1000:1000 logs
-   ```
-
-   If you already started the stack and `logs/` is empty, run the same two commands and then `docker compose restart validator`.
-
-6. **Create the persistent data directory.** Each validator keeps its own state on disk under `./data` (mounted into the container at `/app/data`): the **local audio corpus** (English LibriVox clips, 20–25s — no shared corpus bucket), the **local miner registry** SQLite DB, and the **cached blacklist**. **Pre-create it before the first `docker compose up -d`** — otherwise Docker creates the bind-mount path as `root`, and the container (user `validator`, uid 1000) cannot write to it, so the corpus/registry silently fail and the validator can't generate samples or score:
-
-   ```bash
-   mkdir -p data
-   sudo chown -R 1000:1000 data
-   ```
-
-   If you already started the stack and it's empty (logs show repeated `... Permission denied`), run the same two commands and then `docker compose restart validator`.
-
-   Notes:
-
-   - **Disk:** the corpus holds up to `AUDIO_CORPUS_MAX_ENTRIES` clips (default 10,000) at ~1.1 MB each, so budget roughly **~12 GB** of free disk for `./data`. The registry SQLite DB and blacklist cache are tiny. Lower `AUDIO_CORPUS_MAX_ENTRIES` if disk is tight.
-   - **Warm-up:** on a fresh validator the corpus fills (~10 clips/minute, a few hours to the cap) and the registry runs its first validation pass on boot. Until both are populated, the generator waits between sample slots and the first weight cycle may burn — this is expected.
-   - The mount persists everything across restarts/updates, so the corpus download and model fingerprinting happen only once.
+   **Warm-up (fresh validator only):** the corpus fills in the background (~10 clips/minute, a few hours to the cap) and the registry runs its first validation pass on boot. Until both are populated the generator waits between sample slots and the first weight cycle may burn — this is expected, and only happens once. The `./data` mount persists everything across restarts/updates, so a restart needs **no** warm-up.
 
 ---
 
@@ -174,7 +154,7 @@ Then run `docker compose up -d` as above.
 - **Stream logs (stdout):**  
   `docker compose logs -f validator` (use the service name `validator`, not the container name `vocence-validator`)
 - **Daily log files:**  
-  Logs are written **in real time** into **`logs/vocence_YYYY-MM-DD.log`** (UTC date). Ensure you created `logs` and set ownership (step 4 in section 1) before first run. If `logs/` stays empty: `sudo chown 1000:1000 logs` then `docker compose restart validator`.
+  Logs are written **in real time** into **`logs/vocence_YYYY-MM-DD.log`** (UTC date). The container creates and permissions `./logs` automatically on start.
 - **Watchtower logs:**  
   `docker compose logs -f watchtower`
 - **Restart validator only:**  
@@ -204,7 +184,7 @@ The validator service has a healthcheck; Docker will report its status in `docke
 | Logs (stream) | `docker compose logs -f validator` |
 | Logs (daily files) | `logs/vocence_YYYY-MM-DD.log` in the project directory. |
 | Config | `.env` (including `VALIDATOR_BUCKETS_JSON`) and `~/.bittensor/wallets` on the host. |
-| Local corpus | Pre-create `data/corpus` (`chown 1000:1000`); ~12 GB disk; fills automatically over a few hours. |
+| Local state | `./data` (corpus + registry DB + blacklist cache) — auto-created; ~12 GB disk; fills over a few hours on a fresh validator. |
 
 For the full CI/CD flow (how the image is built and published), see [cicd-pipeline.md](cicd-pipeline.md). For CLI options (e.g. split generator vs weight setter if you run without Docker), see [CLI.md](CLI.md).
 
@@ -219,7 +199,7 @@ For the full CI/CD flow (how the image is built and published), see [cicd-pipeli
   The wallet is mounted correctly, but the container runs as user `validator` (uid 1000). If the wallet on the host is under root’s home and owned by root, the container cannot read it (and may report “does not exist”). On the host run: `sudo chown -R 1000:1000 /root/.bittensor/wallets`, then `docker compose restart validator`.
 
 - **Corpus never fills / logs show "Corpus round failed ... Permission denied"**  
-  The `./data/corpus` bind-mount was created by Docker as `root`, so the container (uid 1000) cannot write clips into it. On the host run: `mkdir -p data/corpus && sudo chown -R 1000:1000 data/corpus`, then `docker compose restart validator`. The corpus then fills over the next few hours.
+  The container's entrypoint normally fixes `./data` ownership automatically. If you still see this (e.g. a hardened host that blocks the entrypoint's chown), run on the host: `sudo chown -R 1000:1000 data logs`, then `docker compose restart validator`.
 
 - **Generator keeps logging "No corpus clip available yet (corpus still filling?)"**  
   Normal on a fresh validator — the local corpus is still downloading. It resolves once enough clips exist. If it persists for many hours, check disk space for `data/corpus` and the permission note above.
