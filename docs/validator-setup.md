@@ -6,8 +6,9 @@ This guide covers running a Vocence validator using **Docker** and **Watchtower*
 
 ## Prerequisites
 
-- **From the Vocence team:** Chutes permission, owner API URL (`API_URL`), Hippius validator bucket keys (for your own samples), and readonly validator-bucket credentials for the active validator set. (No corpus-bucket keys needed — source audio is built locally.)
-- **Your side:** Bittensor wallet (coldkey + hotkey), Docker and Docker Compose installed.
+- **From the Vocence team:** Chutes permission, owner API URL (`API_URL`, used only for the dashboard + centralized blacklist — not for scoring), Hippius validator bucket keys (for your own samples), and readonly validator-bucket credentials for the active validator set. (No corpus-bucket keys needed — source audio is built locally.)
+- **HuggingFace token (`HF_AUTH_TOKEN`):** validators now validate miner model repos themselves (download + fingerprint), so each validator needs its own HF token.
+- **Your side:** Bittensor wallet (coldkey + hotkey), Docker and Docker Compose installed, ~12 GB free disk for `./data`.
 
 ---
 
@@ -112,20 +113,20 @@ Use `docker compose` (with a space) as in this guide; it’s the Compose V2 plug
 
    If you already started the stack and `logs/` is empty, run the same two commands and then `docker compose restart validator`.
 
-6. **Create the local audio corpus directory.** Each validator builds its own source-audio corpus on disk (English LibriVox clips, 20–25s) — there is no shared corpus bucket. The compose file mounts `./data/corpus` into the container at `/app/data/corpus`. **Pre-create it before the first `docker compose up -d`** — otherwise Docker creates the bind-mount path as `root`, and the container (user `validator`, uid 1000) cannot write to it, so the corpus silently never fills and sample generation starves:
+6. **Create the persistent data directory.** Each validator keeps its own state on disk under `./data` (mounted into the container at `/app/data`): the **local audio corpus** (English LibriVox clips, 20–25s — no shared corpus bucket), the **local miner registry** SQLite DB, and the **cached blacklist**. **Pre-create it before the first `docker compose up -d`** — otherwise Docker creates the bind-mount path as `root`, and the container (user `validator`, uid 1000) cannot write to it, so the corpus/registry silently fail and the validator can't generate samples or score:
 
    ```bash
-   mkdir -p data/corpus
-   sudo chown -R 1000:1000 data/corpus
+   mkdir -p data
+   sudo chown -R 1000:1000 data
    ```
 
-   If you already started the stack and the corpus is empty (logs show repeated `Corpus round failed ... Permission denied`), run the same two commands and then `docker compose restart validator`.
+   If you already started the stack and it's empty (logs show repeated `... Permission denied`), run the same two commands and then `docker compose restart validator`.
 
    Notes:
 
-   - **Disk:** the corpus holds up to `AUDIO_CORPUS_MAX_ENTRIES` clips (default 10,000) at ~1.1 MB each, so budget roughly **~12 GB** of free disk for `data/corpus`. Lower `AUDIO_CORPUS_MAX_ENTRIES` if disk is tight.
-   - **Warm-up:** the corpus fills in the background (~10 clips/minute at defaults, so a few hours to reach the cap). Until enough clips exist, the generator waits between sample slots — this is expected on a fresh validator.
-   - The mount persists the corpus across restarts/updates, so this download happens only once.
+   - **Disk:** the corpus holds up to `AUDIO_CORPUS_MAX_ENTRIES` clips (default 10,000) at ~1.1 MB each, so budget roughly **~12 GB** of free disk for `./data`. The registry SQLite DB and blacklist cache are tiny. Lower `AUDIO_CORPUS_MAX_ENTRIES` if disk is tight.
+   - **Warm-up:** on a fresh validator the corpus fills (~10 clips/minute, a few hours to the cap) and the registry runs its first validation pass on boot. Until both are populated, the generator waits between sample slots and the first weight cycle may burn — this is expected.
+   - The mount persists everything across restarts/updates, so the corpus download and model fingerprinting happen only once.
 
 ---
 
@@ -142,18 +143,17 @@ docker compose up -d
 
 ### How scoring works now
 
-The validator still generates its own samples locally, but final weight setting is based on **global consensus scoring**:
+The validator runs everything itself — it no longer depends on the subnet API for scoring inputs:
 
-- The owner API returns the current valid miner list.
-- The owner API returns the current active validator list.
-- Your validator intersects that active-validator list with `VALIDATOR_BUCKETS_JSON`.
-- For each matching validator bucket, it reads the recent scoring window (default 50 evaluations).
+- **Valid miners** come from the validator's **local registry**: a background task validates miners from chain commitments (HuggingFace repo audit + Chutes checks + duplicate detection — the same logic the subnet API runs) every hour into a local SQLite DB. The centralized **blacklist** is still fetched from the API and cached locally (blacklisted miners are excluded).
+- **Active validators** are determined locally at weight-set time: a peer validator counts as active if its bucket has a fresh evaluation (within `ACTIVE_VALIDATOR_WINDOW_HOURS`, default 24h) and it is on the metagraph with stake ≥ `ACTIVE_VALIDATOR_MIN_STAKE`. No API call.
+- Your validator reads the recent scoring window (default 50 evaluations) from each active validator bucket in `VALIDATOR_BUCKETS_JSON`.
 - It computes a global miner win rate using stake-weighted aggregation (`stake ** 0.25`, fourth-root; configurable via `VALIDATOR_WEIGHT_EXPONENT`).
 - A miner must have more than 40 evaluations in at least 3 active validator buckets to be globally eligible.
 - The winner must still beat earlier eligible miners and the owner base model by the configured threshold margin.
 - If active validator coverage is too low or no miner satisfies the rules, the validator burns for that cycle.
 
-This design reduces single-validator drift and helps honest validators converge on the same weights.
+This makes each validator self-sufficient (the subnet API is dashboard-only) while keeping the deterministic scoring that helps honest validators converge on the same weights. To temporarily fall back to the API for the valid-miner list, set `USE_LOCAL_REGISTRY=false`.
 
 For the full scoring rules and winner-selection details, see [scoring.md](scoring.md).
 
