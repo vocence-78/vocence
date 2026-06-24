@@ -33,10 +33,14 @@ services:
       - HOTKEY_NAME=${HOTKEY_NAME:-default}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_DIR=${LOG_DIR:-logs}
+      # Local audio corpus lives on a persistent volume so it survives restarts
+      # (otherwise the validator re-downloads ~10k LibriVox clips from scratch).
+      - CORPUS_LOCAL_DIR=${CORPUS_LOCAL_DIR:-/app/data/corpus}
 
     volumes:
       - ~/.bittensor/wallets:/home/validator/.bittensor/wallets:ro
       - ./logs:/app/logs
+      - ./data/corpus:/app/data/corpus
 
     deploy:
       resources:
