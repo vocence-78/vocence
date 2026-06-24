@@ -35,7 +35,7 @@ from vocence.domain.config import (
     COLDKEY_NAME,
     HOTKEY_NAME,
     CHAIN_NETWORK,
-    AUDIO_SOURCE_BUCKET,
+    CORPUS_LOCAL_DIR,
     AUDIO_SAMPLES_BUCKET,
     VALIDATOR_ID,
     SAMPLE_SLOT_INTERVAL_BLOCKS,
@@ -48,7 +48,6 @@ from vocence.domain.config import (
 from vocence.shared.logging import emit_log, print_header, print_table
 from vocence.domain.entities import ParticipantInfo
 from vocence.adapters.storage import (
-    create_corpus_storage_client,
     create_validator_storage_client,
 )
 from vocence.ranking.global_scoring import (
@@ -545,7 +544,6 @@ async def main() -> None:
     emit_log("Initializing clients...", "info")
     subtensor_ref: dict = {"client": bt.AsyncSubtensor(network=CHAIN_NETWORK)}
     wallet = bt.Wallet(name=COLDKEY_NAME, hotkey=HOTKEY_NAME)
-    corpus_client = create_corpus_storage_client()
     validator_client = create_validator_storage_client()
     openai_client = AsyncOpenAI(api_key=OPENAI_AUTH_KEY)
     
@@ -555,7 +553,7 @@ async def main() -> None:
     emit_log(f"Subnet ID: {SUBNET_ID}", "info")
     emit_log(f"Cycle length: {CYCLE_LENGTH} blocks, offset {CYCLE_OFFSET_BLOCKS} (~{CYCLE_LENGTH * 12}s)", "info")
     emit_log(f"Sample slots: every {SAMPLE_SLOT_INTERVAL_BLOCKS} blocks at offset {SAMPLE_SLOT_OFFSET_BLOCKS} (validator_id={VALIDATOR_ID})", "info")
-    emit_log(f"Corpus bucket (read): s3://{AUDIO_SOURCE_BUCKET}", "info")
+    emit_log(f"Corpus (local): {CORPUS_LOCAL_DIR}", "info")
     emit_log(f"Samples bucket (own): s3://{AUDIO_SAMPLES_BUCKET}", "info")
     emit_log(f"Min evals to compete: {MIN_EVALS_TO_COMPETE}", "info")
     emit_log(f"Threshold margin: {THRESHOLD_MARGIN}", "info")
@@ -592,7 +590,7 @@ async def main() -> None:
             start_time = time.time()
             try:
                 await generate_samples_continuously(
-                    corpus_client, validator_client, openai_client, get_block_with_timeout,
+                    validator_client, openai_client, get_block_with_timeout,
                 )
                 # generate_samples_continuously is an infinite loop — returning is unexpected.
                 emit_log(
@@ -616,18 +614,39 @@ async def main() -> None:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, backoff_max)
 
+    async def run_corpus_manager_supervised() -> None:
+        """Keep the local audio corpus topped up, restarting on crash with backoff."""
+        from vocence.pipeline.corpus import run_corpus_manager
+        import traceback as _tb
+        backoff = 12.0
+        while True:
+            try:
+                await run_corpus_manager()
+                return  # run_corpus_manager loops forever; returning is unexpected
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                emit_log(f"Corpus manager crashed: {e}. Restarting in {backoff:.0f}s...", "error")
+                _tb.print_exc()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300.0)
+
+    corpus_task = asyncio.create_task(run_corpus_manager_supervised())
     generator_task = asyncio.create_task(run_generator_supervised())
 
-    def handle_generator_exception(task: asyncio.Task) -> None:
-        """Surface unexpected exits from the supervisor itself (it should run forever)."""
-        try:
-            exc = task.exception()
-            if exc is not None:
-                emit_log(f"Generator supervisor exited with exception: {exc}", "error")
-        except asyncio.CancelledError:
-            emit_log("Generator supervisor was cancelled", "warn")
+    def handle_supervisor_exception(name: str):
+        def _cb(task: asyncio.Task) -> None:
+            """Surface unexpected exits from a supervisor (they should run forever)."""
+            try:
+                exc = task.exception()
+                if exc is not None:
+                    emit_log(f"{name} supervisor exited with exception: {exc}", "error")
+            except asyncio.CancelledError:
+                emit_log(f"{name} supervisor was cancelled", "warn")
+        return _cb
 
-    generator_task.add_done_callback(handle_generator_exception)
+    corpus_task.add_done_callback(handle_supervisor_exception("Corpus"))
+    generator_task.add_done_callback(handle_supervisor_exception("Generator"))
 
     emit_log("Starting weight setting loop...", "start")
     while True:

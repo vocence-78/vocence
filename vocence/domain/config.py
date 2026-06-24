@@ -252,11 +252,14 @@ HF_AUTH_TOKEN = os.environ.get("HF_AUTH_TOKEN")
 MODEL_FINGERPRINT_CACHE_TTL = int(os.environ.get("MODEL_FINGERPRINT_CACHE_TTL", "3600"))  # 1 hour
 
 # Source audio downloader (LibriVox only)
-AUDIO_CORPUS_MAX_ENTRIES = int(os.environ.get("AUDIO_CORPUS_MAX_ENTRIES", "1000000"))  # Max clips in corpus; prune oldest when exceeded
+AUDIO_CORPUS_MAX_ENTRIES = int(os.environ.get("AUDIO_CORPUS_MAX_ENTRIES", "10000"))  # Max clips in corpus; prune oldest when exceeded
 AUDIO_CORPUS_MANIFEST_PATH = os.environ.get(
     "AUDIO_CORPUS_MANIFEST_PATH",
     os.path.join(os.getcwd(), "data", "audio_corpus_manifest.json"),
 )
+# Local corpus directory: each validator maintains its own source-audio corpus on disk
+# (English LibriVox clips, 20-25s) instead of reading from a shared S3 corpus bucket.
+CORPUS_LOCAL_DIR = os.environ.get("CORPUS_LOCAL_DIR", os.path.join(os.getcwd(), "data", "corpus"))
 SOURCE_AUDIO_DOWNLOAD_INTERVAL = int(os.environ.get("SOURCE_AUDIO_DOWNLOAD_INTERVAL", "60"))  # Seconds between rounds
 LIBRIVOX_CLIPS_PER_CHAPTER = int(os.environ.get("LIBRIVOX_CLIPS_PER_CHAPTER", "10"))
 LIBRIVOX_CLIP_MIN_SEC = int(os.environ.get("LIBRIVOX_CLIP_MIN_SEC", "20"))

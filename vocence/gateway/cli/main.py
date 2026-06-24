@@ -168,8 +168,9 @@ def start_generator():
     import asyncio
     from vocence.domain.config import OPENAI_AUTH_KEY, CHUTES_AUTH_KEY, CHAIN_NETWORK, SUBTENSOR_TIMEOUT_SEC
     from vocence.shared.logging import emit_log, print_header
-    from vocence.adapters.storage import create_corpus_storage_client, create_validator_storage_client
+    from vocence.adapters.storage import create_validator_storage_client
     from vocence.pipeline.generation import generate_samples_continuously
+    from vocence.pipeline.corpus import run_corpus_manager
 
     async def run_generator():
         print_header("Vocence Prompt Generator Starting")
@@ -182,18 +183,44 @@ def start_generator():
             return
 
         subtensor = bt.AsyncSubtensor(network=CHAIN_NETWORK)
-        corpus_client = create_corpus_storage_client()
         validator_client = create_validator_storage_client()
         openai_client = AsyncOpenAI(api_key=OPENAI_AUTH_KEY)
 
         async def get_block_with_timeout():
             return await asyncio.wait_for(subtensor.get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC)
 
-        await generate_samples_continuously(
-            corpus_client, validator_client, openai_client, get_block_with_timeout
-        )
+        # Keep the local corpus topped up in the background while generating samples.
+        corpus_task = asyncio.create_task(run_corpus_manager())
+        try:
+            await generate_samples_continuously(
+                validator_client, openai_client, get_block_with_timeout
+            )
+        finally:
+            corpus_task.cancel()
 
     asyncio.run(run_generator())
+
+
+@services.command("corpus")
+def start_corpus():
+    """Start the local audio corpus manager only.
+
+    Continuously downloads English LibriVox clips (20-25s) into the local corpus
+    directory (CORPUS_LOCAL_DIR) and prunes oldest clips beyond AUDIO_CORPUS_MAX_ENTRIES.
+    Run this as a standalone process when generation and corpus upkeep are split.
+    """
+    import asyncio
+    from vocence.shared.logging import print_header
+    from vocence.pipeline.corpus import run_corpus_manager
+
+    async def run():
+        print_header("Vocence Local Corpus Manager Starting")
+        await run_corpus_manager()
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        pass
 
 
 @services.command("validator")
