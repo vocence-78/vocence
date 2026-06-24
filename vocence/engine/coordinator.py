@@ -296,8 +296,7 @@ async def execute_cycle(
         emit_log(f"[{block}] Failed to load validator bucket config: {e}", "error")
         bucket_configs = []
 
-    # Fetch the metagraph up front: needed both to detect active validators (stake +
-    # presence) and later to map winner -> uid for set_weights.
+    # Metagraph up front: needed for active-validator detection and set_weights.
     try:
         metagraph = await asyncio.wait_for(subtensor.metagraph(SUBNET_ID), timeout=SUBTENSOR_TIMEOUT_SEC)
     except asyncio.TimeoutError:
@@ -310,8 +309,7 @@ async def execute_cycle(
 
     validator_stakes = validator_stakes_from_metagraph(metagraph)
 
-    # Active validators are determined locally from bucket freshness + metagraph stake
-    # (replaces the owner API /validators/active).
+    # Active validators: bucket freshness + metagraph stake (replaces /validators/active).
     freshness_seconds = ACTIVE_VALIDATOR_WINDOW_HOURS * 3600
     selected_bucket_configs, active_events = await determine_active_bucket_configs(
         bucket_configs, validator_stakes, freshness_seconds, ACTIVE_VALIDATOR_MIN_STAKE

@@ -66,12 +66,8 @@ S3_UPLOAD_MAX_RETRIES = 3
 async def _fput_object_with_retry(
     storage_client: Minio, object_name: str, local_path: str
 ) -> None:
-    """Upload one object, retrying transient failures with exponential backoff.
-
-    A finished sample has already cost real compute (miner queries + GPT scoring),
-    so we don't want a momentary S3 hiccup to discard it. Raises the last error if
-    all attempts fail (caller's round-level handler logs and moves on).
-    """
+    """Upload one object with retry/backoff so a transient S3 blip doesn't discard a
+    finished (already-scored) sample. Raises the last error if all attempts fail."""
     last_error: Exception | None = None
     for attempt in range(S3_UPLOAD_MAX_RETRIES):
         try:

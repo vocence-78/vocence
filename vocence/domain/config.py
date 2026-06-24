@@ -164,17 +164,13 @@ LOG_DIR = os.environ.get("LOG_DIR", "logs")
 PARTICIPANT_VALIDATION_INTERVAL = int(os.environ.get("PARTICIPANT_VALIDATION_INTERVAL", "3600"))
 METRICS_CALCULATION_INTERVAL = int(os.environ.get("METRICS_CALCULATION_INTERVAL", "1800"))
 
-# Local miner registry (validators validate miners themselves instead of calling the
-# owner API). When enabled, each validator runs the same validation pipeline on a
-# schedule, stores results in a local SQLite DB, and reads valid miners from it.
+# Local miner registry: validators validate miners themselves into a local SQLite DB
+# instead of calling the owner API (set false to fall back to the API).
 USE_LOCAL_REGISTRY = (os.environ.get("USE_LOCAL_REGISTRY", "true").lower() == "true")
 REGISTRY_DB_PATH = os.environ.get("REGISTRY_DB_PATH", os.path.join(os.getcwd(), "data", "registry.sqlite"))
-# Blacklist stays centralized; validators fetch it from the owner API and cache it on
-# disk so a brief API outage doesn't change their valid-miner set (fail to last-known).
+# Centralized blacklist cached on disk (fail to last-known on API outage).
 BLOCKLIST_CACHE_PATH = os.environ.get("BLOCKLIST_CACHE_PATH", os.path.join(os.getcwd(), "data", "blocklist_cache.json"))
-# Active-validator detection at weight-set time: a peer validator counts as active if
-# its bucket has a fresh eval (within ACTIVE_VALIDATOR_WINDOW_HOURS of now) and it is on
-# the metagraph with stake >= ACTIVE_VALIDATOR_MIN_STAKE.
+# Min stake for a peer validator's bucket to count as active at weight-set time.
 ACTIVE_VALIDATOR_MIN_STAKE = float(os.environ.get("ACTIVE_VALIDATOR_MIN_STAKE", "0"))
 
 # Auth (owner API)

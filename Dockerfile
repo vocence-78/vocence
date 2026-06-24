@@ -45,8 +45,7 @@ RUN useradd -m -u 1000 validator \
     && chown validator:validator /home/validator/.bittensor \
     && chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# NOTE: stays root so the entrypoint can fix bind-mount ownership, then drops to
-# the `validator` user via gosu before running the app.
+# Stays root so the entrypoint can fix mount ownership, then drops to validator (gosu).
 
 ENV PYTHONUNBUFFERED=1
 ENV NETWORK=finney

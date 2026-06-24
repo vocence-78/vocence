@@ -445,9 +445,8 @@ async def compare_naturalness_async(
             ),
         )
     except Exception as e:
-        # Judge failure is our fault, not the miner's — return None so the
-        # naturalness element is skipped and remaining weights renormalize
-        # (neutral), rather than penalizing the miner with an auto-loss.
+        # Judge failure isn't the miner's fault: return None so the element is
+        # skipped/renormalized (neutral) instead of an auto-loss.
         emit_log(f"Naturalness pairwise failed ({e}); skipping element (neutral)", "warn")
         return None
 

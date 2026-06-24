@@ -1,18 +1,11 @@
 """
-Per-validator local miner registry.
+Per-validator local miner registry: validators run the owner API's validation
+pipeline locally against a SQLite DB instead of calling the API for valid miners.
 
-Each validator runs the *same* validation pipeline the owner API runs
-(`ParticipantValidationTask._validate_participants`), but against a local SQLite DB
-instead of the owner's Postgres. This removes the validator's dependency on the
-owner API for the valid-miner list — validators read chain commitments, validate
-miners themselves (HuggingFace + Chutes + duplicate detection), and persist results
-locally.
-
-- run_miner_registry()            -> supervised background loop (validate hourly)
+- run_miner_registry()             -> supervised hourly validation loop
 - fetch_local_valid_participants() -> read valid miners from local SQLite
 
-The blacklist stays centralized: it is fetched from the owner API and cached on disk
-(fail to last-known on outage) so a brief API blip can't change the valid set.
+The blacklist stays centralized; it's fetched and cached on disk (fail to last-known).
 """
 
 from __future__ import annotations
@@ -143,12 +136,9 @@ async def _sync_blacklist_to_local_db() -> None:
 
 
 async def run_miner_registry() -> None:
-    """Continuous loop: validate miners locally and persist to SQLite.
+    """Validate miners locally and persist to SQLite, every interval with jitter.
 
-    Reuses the owner API's ParticipantValidationTask verbatim (same validation +
-    dedup + owner injection), only the storage backend differs. The first pass runs
-    on boot (after a small random delay so simultaneous auto-updates don't stampede
-    HuggingFace/Chutes), then every PARTICIPANT_VALIDATION_INTERVAL with jitter.
+    Reuses the owner API's ParticipantValidationTask verbatim (only the DB differs).
     """
     await init_local_registry()
     from vocence.gateway.http.service.tasks.participant_validation import (
@@ -156,8 +146,7 @@ async def run_miner_registry() -> None:
     )
 
     task = ParticipantValidationTask()
-    # Initial jitter (0-120s): avoid every validator validating at the same instant.
-    await asyncio.sleep(random.random() * 120)
+    await asyncio.sleep(random.random() * 120)  # jitter so validators don't sync their first pass
     emit_log("Local miner registry loop starting", "start")
     while True:
         try:

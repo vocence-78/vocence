@@ -230,9 +230,7 @@ def _download_one_batch_local_sync() -> int:
             if max_start <= 0:
                 continue
             start_sec = rng.uniform(0, max_start)
-            # Write to a temp name (not matching *.wav so readers ignore it), then
-            # atomically rename into place so select_local_audio never sees a
-            # partially written clip.
+            # Write to a temp name then atomic-rename so readers never see a partial clip.
             final_path = os.path.join(CORPUS_LOCAL_DIR, f"{uuid.uuid4().hex}.wav")
             tmp_path = final_path + ".tmp"
             if _extract_clip_ffmpeg_sync(chapter_path, start_sec, clip_dur, tmp_path):
@@ -282,7 +280,7 @@ async def run_corpus_manager() -> None:
         try:
             await asyncio.to_thread(_download_one_batch_local_sync)
             await asyncio.to_thread(_prune_to_limit)
-            rate_limit_backoff = 0.0  # success: clear any backoff
+            rate_limit_backoff = 0.0
         except asyncio.CancelledError:
             emit_log("Local corpus manager cancelled", "warn")
             raise

@@ -75,11 +75,9 @@ def select_active_bucket_configs(
 
 
 def _newest_eval_age_seconds_sync(client: Any, bucket_name: str) -> Optional[float]:
-    """Age in seconds of the newest evaluation in a bucket, or None if empty/unknown.
+    """Age (seconds) of the newest evaluation in a bucket, or None if empty/unknown.
 
-    Evaluation prefixes are timestamps ``YYYY-MM-DD_HH-MM-SS`` (lexicographically
-    sortable). Uses a non-recursive listing so only the top-level eval prefixes are
-    read, not every object. Tolerates clock skew because the freshness window is wide.
+    Eval prefixes are sortable timestamps; non-recursive listing reads only those.
     """
     try:
         objs = list(client.list_objects(bucket_name, recursive=False))
@@ -107,11 +105,9 @@ async def determine_active_bucket_configs(
     freshness_seconds: float,
     min_stake: float = 0.0,
 ) -> Tuple[List[ValidatorBucketConfig], List[dict]]:
-    """Decide which validators are active *locally*, replacing the owner API's
-    /validators/active. A peer validator is active when it is on the metagraph with
-    stake >= min_stake AND its bucket has an evaluation fresher than freshness_seconds.
-
-    Returns (active_configs, events) where events are log-friendly dicts.
+    """Active validators (replacing /validators/active): on the metagraph with
+    stake >= min_stake AND a bucket eval fresher than freshness_seconds.
+    Returns (active_configs, log-friendly events).
     """
 
     async def check(cfg: ValidatorBucketConfig):

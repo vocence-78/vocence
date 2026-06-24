@@ -78,9 +78,8 @@ async def establish_connection(connection_string: Optional[str] = None) -> Async
     emit_log(f"Establishing database connection: {connection_string.split('@')[-1]}", "info")
 
     if _is_sqlite(connection_string):
-        # SQLite (validator local registry): no server-style pool args; enable WAL so
-        # the registry writer and the generator/weight-setter readers don't block each
-        # other, and a busy_timeout so brief write contention retries instead of erroring.
+        # SQLite (validator local registry): no server pool args; WAL + busy_timeout
+        # so the registry writer and reader tasks don't block each other.
         _db_engine = create_async_engine(
             connection_string,
             pool_pre_ping=True,
@@ -209,9 +208,8 @@ async def initialize_schema() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(BaseModel.metadata.create_all)
 
-    # The ADD COLUMN IF NOT EXISTS migrations are Postgres-only (for DBs created
-    # before those columns existed). SQLite doesn't support that syntax, and a fresh
-    # SQLite DB already gets every column from create_all above, so skip them there.
+    # ADD COLUMN IF NOT EXISTS is Postgres-only; SQLite gets every column from
+    # create_all above, so skip these migrations there.
     if engine.dialect.name != "sqlite":
         await ensure_evaluation_audio_columns()
         await ensure_evaluation_score_columns()

@@ -33,9 +33,7 @@ services:
       - HOTKEY_NAME=${HOTKEY_NAME:-default}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_DIR=${LOG_DIR:-logs}
-      # The validator's persistent state lives under /app/data (mounted below) so it
-      # survives restarts: the local audio corpus (~10k LibriVox clips), the local
-      # miner registry SQLite DB, and the cached blacklist.
+      # Persistent state under /app/data (mounted below): corpus, registry DB, blacklist cache.
       - CORPUS_LOCAL_DIR=${CORPUS_LOCAL_DIR:-/app/data/corpus}
       - REGISTRY_DB_PATH=${REGISTRY_DB_PATH:-/app/data/registry.sqlite}
       - BLOCKLIST_CACHE_PATH=${BLOCKLIST_CACHE_PATH:-/app/data/blocklist_cache.json}
