@@ -78,7 +78,7 @@ def start_generator():
     from openai import AsyncOpenAI
 
     import asyncio
-    from vocence.domain.config import OPENAI_AUTH_KEY, CHUTES_AUTH_KEY, CHAIN_NETWORK, SUBTENSOR_TIMEOUT_SEC
+    from vocence.domain.config import OPENAI_AUTH_KEY, CHUTES_AUTH_KEY, CHAIN_NETWORK, SUBTENSOR_TIMEOUT_SEC, USE_LOCAL_REGISTRY
     from vocence.shared.logging import emit_log, print_header
     from vocence.adapters.storage import create_validator_storage_client
     from vocence.pipeline.generation import generate_samples_continuously
@@ -101,14 +101,18 @@ def start_generator():
         async def get_block_with_timeout():
             return await asyncio.wait_for(subtensor.get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC)
 
-        # Keep the local corpus topped up in the background while generating samples.
-        corpus_task = asyncio.create_task(run_corpus_manager())
+        # Background: keep the local corpus topped up and (if enabled) the miner registry fresh.
+        bg_tasks = [asyncio.create_task(run_corpus_manager())]
+        if USE_LOCAL_REGISTRY:
+            from vocence.registry.local_registry import run_miner_registry
+            bg_tasks.append(asyncio.create_task(run_miner_registry()))
         try:
             await generate_samples_continuously(
                 validator_client, openai_client, get_block_with_timeout
             )
         finally:
-            corpus_task.cancel()
+            for t in bg_tasks:
+                t.cancel()
 
     asyncio.run(run_generator())
 
@@ -135,6 +139,30 @@ def start_corpus():
         pass
 
 
+@services.command("registry")
+def start_registry():
+    """Start the local miner registry only.
+
+    Validates miners from chain commitments (HuggingFace + Chutes + duplicate
+    detection), mirrors the central blacklist, and writes valid miners to the local
+    SQLite registry (REGISTRY_DB_PATH). 'serve', 'services generator', and
+    'services validator' already run this in the background; use this to run it as a
+    standalone process when splitting services.
+    """
+    import asyncio
+    from vocence.shared.logging import print_header
+    from vocence.registry.local_registry import run_miner_registry
+
+    async def run():
+        print_header("Vocence Local Miner Registry Starting")
+        await run_miner_registry()
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        pass
+
+
 @services.command("validator")
 def start_validator():
     """Start weight setting service only.
@@ -143,12 +171,12 @@ def start_validator():
     Does NOT generate samples - use this with a separate generator instance.
     """
     import bittensor as bt
-    
-    from vocence.domain.config import CHAIN_NETWORK, COLDKEY_NAME, HOTKEY_NAME
+
+    from vocence.domain.config import CHAIN_NETWORK, COLDKEY_NAME, HOTKEY_NAME, USE_LOCAL_REGISTRY
     from vocence.shared.logging import emit_log, print_header
     from vocence.adapters.storage import create_validator_storage_client
     from vocence.engine.coordinator import cycle_step
-    
+
     async def run_validator():
         print_header("Vocence Validator (Weight Setter) Starting")
         # Use ref so cycle_step can reconnect on timeout
@@ -157,9 +185,18 @@ def start_validator():
         validator_client = create_validator_storage_client()
         emit_log(f"Wallet: {COLDKEY_NAME}/{HOTKEY_NAME}", "info")
         emit_log(f"Network: {CHAIN_NETWORK}", "info")
-        while True:
-            await cycle_step(subtensor_ref, wallet, validator_client)
-    
+        # Weight-setting reads valid miners from the local registry, so keep it fresh.
+        registry_task = None
+        if USE_LOCAL_REGISTRY:
+            from vocence.registry.local_registry import run_miner_registry
+            registry_task = asyncio.create_task(run_miner_registry())
+        try:
+            while True:
+                await cycle_step(subtensor_ref, wallet, validator_client)
+        finally:
+            if registry_task is not None:
+                registry_task.cancel()
+
     asyncio.run(run_validator())
 
 

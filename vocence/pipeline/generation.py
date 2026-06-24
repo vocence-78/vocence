@@ -22,6 +22,7 @@ from openai import AsyncOpenAI
 
 from vocence.domain.config import (
     API_URL,
+    USE_LOCAL_REGISTRY,
     CHUTES_AUTH_KEY,
     AUDIO_SAMPLES_BUCKET,
     CLIP_LENGTH_SECONDS,
@@ -312,27 +313,29 @@ async def synthesize_audio_for_participants(
     return output
 
 
-async def get_valid_participants_from_api() -> list[ParticipantInfo]:
-    """Get valid participants from the centralized API.
-    
-    The API service validates participants (HuggingFace, Chutes, plagiarism)
-    so we don't need to re-validate here.
-    
-    Returns:
-        List of valid ParticipantInfo objects
+async def get_valid_participants() -> list[ParticipantInfo]:
+    """Get valid participants for sample generation.
+
+    Default: the validator's own local registry (no API dependency). If
+    USE_LOCAL_REGISTRY is disabled, fall back to the centralized API.
     """
+    if USE_LOCAL_REGISTRY:
+        try:
+            from vocence.registry.local_registry import fetch_local_valid_participants
+            return await fetch_local_valid_participants()
+        except Exception as e:
+            emit_log(f"Failed to read local registry: {e}", "warn")
+            return []
     try:
         from vocence.adapters.api import create_service_client_from_wallet
-        
+
         client = create_service_client_from_wallet(
             wallet_name=COLDKEY_NAME,
             hotkey_name=HOTKEY_NAME,
             api_url=API_URL,
         )
-        
         try:
-            miners = await client.get_valid_miners()
-            return miners
+            return await client.get_valid_miners()
         finally:
             await client.close()
     except Exception as e:
@@ -364,7 +367,7 @@ async def generate_samples_continuously(
         f"Sample generation loop starting (validator_id={VALIDATOR_ID}, slot every {SAMPLE_SLOT_INTERVAL_BLOCKS} blocks at offset {SAMPLE_SLOT_OFFSET_BLOCKS})",
         "start",
     )
-    emit_log(f"Using API for valid miners: {API_URL}", "info")
+    emit_log(f"Valid miners source: {'local registry' if USE_LOCAL_REGISTRY else f'API {API_URL}'}", "info")
 
     global _last_executed_slot_block
     round_num = 0
@@ -404,7 +407,7 @@ async def generate_samples_continuously(
 
             # 1. Get valid participants from centralized API
             try:
-                valid_participants = await get_valid_participants_from_api()
+                valid_participants = await get_valid_participants()
             except Exception as e:
                 emit_log(f"Failed to get participants from API: {e}", "error")
                 await asyncio.sleep(SECONDS_PER_BLOCK)

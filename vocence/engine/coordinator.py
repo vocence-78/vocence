@@ -44,6 +44,9 @@ from vocence.domain.config import (
     MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING,
     MIN_VALIDATOR_APPEARANCES_FOR_ELIGIBILITY,
     MIN_EVALS_PER_VALIDATOR_FOR_GLOBAL_SCORE,
+    USE_LOCAL_REGISTRY,
+    ACTIVE_VALIDATOR_WINDOW_HOURS,
+    ACTIVE_VALIDATOR_MIN_STAKE,
 )
 from vocence.shared.logging import emit_log, print_header, print_table
 from vocence.domain.entities import ParticipantInfo
@@ -55,9 +58,10 @@ from vocence.ranking.global_scoring import (
     build_global_scoring_snapshot,
     choose_winner,
     collect_validator_bucket_scores,
-    select_active_bucket_configs,
+    determine_active_bucket_configs,
     validator_stakes_from_metagraph,
 )
+from vocence.registry.local_registry import fetch_local_valid_participants
 from vocence.pipeline.generation import generate_samples_continuously
 from vocence.validator_buckets import ValidatorBucketConfig, load_validator_bucket_configs
 
@@ -66,47 +70,32 @@ from vocence.validator_buckets import ValidatorBucketConfig, load_validator_buck
 _last_executed_cycle_block: int | None = None
 
 
-async def fetch_participants_from_api() -> List[ParticipantInfo]:
-    """Get valid participants from the centralized API.
-    
-    Returns:
-        List of valid ParticipantInfo objects
+async def fetch_valid_participants() -> List[ParticipantInfo]:
+    """Get valid participants.
+
+    Default: the validator's own local registry (no API dependency). If
+    USE_LOCAL_REGISTRY is disabled, fall back to the centralized API.
     """
+    if USE_LOCAL_REGISTRY:
+        try:
+            return await fetch_local_valid_participants()
+        except Exception as e:
+            emit_log(f"Failed to read local registry: {e}", "warn")
+            return []
     try:
         from vocence.adapters.api import create_service_client_from_wallet
-        
+
         client = create_service_client_from_wallet(
             wallet_name=COLDKEY_NAME,
             hotkey_name=HOTKEY_NAME,
             api_url=API_URL,
         )
-        
         try:
-            miners = await client.get_valid_miners()
-            return miners
+            return await client.get_valid_miners()
         finally:
             await client.close()
     except Exception as e:
         emit_log(f"Failed to get miners from API: {e}", "warn")
-        return []
-
-
-async def fetch_active_validators_from_api() -> List[str]:
-    """Get active validator hotkeys from the centralized API."""
-    try:
-        from vocence.adapters.api import create_service_client_from_wallet
-
-        client = create_service_client_from_wallet(
-            wallet_name=COLDKEY_NAME,
-            hotkey_name=HOTKEY_NAME,
-            api_url=API_URL,
-        )
-        try:
-            return await client.get_active_validators()
-        finally:
-            await client.close()
-    except Exception as e:
-        emit_log(f"Failed to get active validators from API: {e}", "warn")
         return []
 
 
@@ -279,23 +268,12 @@ async def execute_cycle(
     subtensor = subtensor_ref["client"]
     _ = storage_client  # generation still uses the local validator bucket; scoring now reads all active validator buckets
 
-    emit_log(f"[{block}] Fetching participants and active validators from API", "info")
+    emit_log(f"[{block}] Gathering inputs (local registry + metagraph + validator buckets)", "info")
     await _send_weight_setting_graph_event(block, phase="fetching_inputs")
 
-    try:
-        participant_infos = await fetch_participants_from_api()
-    except Exception as e:
-        emit_log(f"[{block}] Failed to get participants from API: {e}", "error")
-        return
-
+    participant_infos = await fetch_valid_participants()
     if not participant_infos:
         emit_log(f"[{block}] No participant commitments found", "warn")
-        return
-
-    try:
-        active_validator_hotkeys = await fetch_active_validators_from_api()
-    except Exception as e:
-        emit_log(f"[{block}] Failed to get active validators from API: {e}", "error")
         return
 
     valid_participants = [p for p in participant_infos if p.is_valid]
@@ -318,23 +296,35 @@ async def execute_cycle(
         emit_log(f"[{block}] Failed to load validator bucket config: {e}", "error")
         bucket_configs = []
 
-    if len(active_validator_hotkeys) < MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING:
-        emit_log(
-            f"[{block}] Only {len(active_validator_hotkeys)} active validators from API; need at least {MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING}. Burning this cycle.",
-            "warn",
-        )
-        selected_bucket_configs: list[ValidatorBucketConfig] = []
-    else:
-        selected_bucket_configs, missing_hotkeys = select_active_bucket_configs(bucket_configs, active_validator_hotkeys)
-        if missing_hotkeys:
-            emit_log(
-                f"Active validator hotkeys missing from local bucket config: {len(missing_hotkeys)} ({', '.join(hk[:8] for hk in missing_hotkeys[:5])})",
-                "warn",
-            )
+    # Fetch the metagraph up front: needed both to detect active validators (stake +
+    # presence) and later to map winner -> uid for set_weights.
+    try:
+        metagraph = await asyncio.wait_for(subtensor.metagraph(SUBNET_ID), timeout=SUBTENSOR_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        emit_log(f"[{block}] Timed out fetching metagraph (>{SUBTENSOR_TIMEOUT_SEC}s), reconnecting subtensor...", "error")
+        await _reconnect_subtensor(subtensor_ref)
+        return
+    except Exception as e:
+        emit_log(f"[{block}] Failed to fetch metagraph: {e}", "error")
+        return
+
+    validator_stakes = validator_stakes_from_metagraph(metagraph)
+
+    # Active validators are determined locally from bucket freshness + metagraph stake
+    # (replaces the owner API /validators/active).
+    freshness_seconds = ACTIVE_VALIDATOR_WINDOW_HOURS * 3600
+    selected_bucket_configs, active_events = await determine_active_bucket_configs(
+        bucket_configs, validator_stakes, freshness_seconds, ACTIVE_VALIDATOR_MIN_STAKE
+    )
+    for ev in active_events:
+        if ev.get("level") == "info":
+            emit_log(f"Active validator {str(ev.get('hotkey',''))[:8]}... ({ev.get('bucket_name')}): {ev.get('reason')}", "info")
+        else:
+            emit_log(f"Inactive/skipped validator {str(ev.get('hotkey',''))[:8]}... ({ev.get('bucket_name', '')}): {ev.get('reason') or ev.get('message')}", "warn")
 
     if len(selected_bucket_configs) < MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING:
         emit_log(
-            f"[{block}] Only {len(selected_bucket_configs)} active validators have local bucket credentials; need at least {MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING}. Burning this cycle.",
+            f"[{block}] Only {len(selected_bucket_configs)} active validator buckets (fresh + on metagraph); need at least {MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING}. Burning this cycle.",
             "warn",
         )
         bucket_scores: Dict[str, Dict[str, Dict[str, Any]]] = {}
@@ -364,17 +354,6 @@ async def execute_cycle(
                     "info",
                 )
 
-    try:
-        metagraph = await asyncio.wait_for(subtensor.metagraph(SUBNET_ID), timeout=SUBTENSOR_TIMEOUT_SEC)
-    except asyncio.TimeoutError:
-        emit_log(f"[{block}] Timed out fetching metagraph (>{SUBTENSOR_TIMEOUT_SEC}s), reconnecting subtensor...", "error")
-        await _reconnect_subtensor(subtensor_ref)
-        return
-    except Exception as e:
-        emit_log(f"[{block}] Failed to fetch metagraph: {e}", "error")
-        return
-
-    validator_stakes = validator_stakes_from_metagraph(metagraph)
     scores = aggregate_global_scores(bucket_scores, validator_stakes)
     if not scores:
         emit_log(f"[{block}] No usable global evaluation data found across active validator buckets", "warn")
@@ -537,8 +516,8 @@ async def main() -> None:
         emit_log("OPENAI_AUTH_KEY environment variable required", "error")
         return
 
-    emit_log(f"Using centralized API for miners: {API_URL}", "info")
-    emit_log(f"Using corpus bucket (read) and own samples bucket for scoring: {AUDIO_SAMPLES_BUCKET}", "info")
+    emit_log(f"Valid miners source: {'local registry' if USE_LOCAL_REGISTRY else f'API {API_URL}'}", "info")
+    emit_log(f"Active validators: bucket freshness (<{ACTIVE_VALIDATOR_WINDOW_HOURS}h) + metagraph stake", "info")
 
     # Use a ref so we can replace the subtensor on timeout (reconnect).
     emit_log("Initializing clients...", "info")
@@ -631,8 +610,28 @@ async def main() -> None:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 300.0)
 
+    async def run_registry_supervised() -> None:
+        """Keep the local miner registry validating, restarting on crash with backoff."""
+        from vocence.registry.local_registry import run_miner_registry
+        import traceback as _tb
+        backoff = 12.0
+        while True:
+            try:
+                await run_miner_registry()
+                return  # run_miner_registry loops forever; returning is unexpected
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                emit_log(f"Miner registry crashed: {e}. Restarting in {backoff:.0f}s...", "error")
+                _tb.print_exc()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300.0)
+
     corpus_task = asyncio.create_task(run_corpus_manager_supervised())
     generator_task = asyncio.create_task(run_generator_supervised())
+    registry_task = (
+        asyncio.create_task(run_registry_supervised()) if USE_LOCAL_REGISTRY else None
+    )
 
     def handle_supervisor_exception(name: str):
         def _cb(task: asyncio.Task) -> None:
@@ -647,6 +646,8 @@ async def main() -> None:
 
     corpus_task.add_done_callback(handle_supervisor_exception("Corpus"))
     generator_task.add_done_callback(handle_supervisor_exception("Generator"))
+    if registry_task is not None:
+        registry_task.add_done_callback(handle_supervisor_exception("Registry"))
 
     emit_log("Starting weight setting loop...", "start")
     while True:
