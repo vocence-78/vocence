@@ -50,99 +50,11 @@ def serve():
 @cli.command("api")
 def api():
     """Start the HTTP API only (participants, evaluations, metrics, blocklist).
-    
-    Single process. For owner, use `vocence owner serve` to run API + downloader
-    in separate processes.
+
+    Single process. Dashboard/metrics service only — validators run independently.
     """
     from vocence.gateway.http.service.app import run_service
     run_service()
-
-
-# Owner commands (corpus bucket owner: run all owner-side processes)
-@cli.group()
-def owner():
-    """Corpus owner: run all processes that populate the Hippius corpus bucket.
-    
-    Use owner Hippius credentials (HIPPIUS_OWNER_* or HIPPIUS_ACCESS_KEY).
-    """
-    pass
-
-
-@owner.command("serve")
-@click.option(
-    "--rounds",
-    type=int,
-    default=None,
-    help="Run N rounds then exit (default: run until Ctrl+C)",
-)
-@click.option(
-    "--delay",
-    type=float,
-    default=2.0,
-    help="Initial delay in seconds before first round (default: 2.0)",
-)
-@click.option(
-    "--no-api",
-    is_flag=True,
-    help="Run only the source audio downloader (no HTTP API). Use when API runs elsewhere.",
-)
-def owner_serve(rounds, delay, no_api):
-    """Run all owner processes in separate processes: API + source audio downloader.
-    
-    By default starts two processes:
-    - Process 1: HTTP API (participants, evaluations, metrics, blocklist) on SERVICE_PORT (default 8000)
-    - Process 2: Source audio downloader (LibriVox → corpus bucket, prune when over limit)
-    
-    Use --no-api to run only the downloader (e.g. if the API is already running).
-    """
-    import os
-    import multiprocessing
-    import time
-
-    from vocence.shared.logging import emit_log, print_header
-    from vocence.gateway.http.service.tasks.source_audio_downloader import (
-        run_source_audio_downloader_standalone,
-    )
-
-    if no_api:
-        try:
-            asyncio.run(
-                run_source_audio_downloader_standalone(
-                    rounds=rounds,
-                    initial_delay_sec=delay,
-                )
-            )
-        except KeyboardInterrupt:
-            pass
-        return
-
-    # Start API in a separate process
-    from vocence.gateway.http.service.app import run_service
-
-    api_process = multiprocessing.Process(target=run_service)
-    api_process.start()
-    from vocence.domain.config import SERVICE_HOST, SERVICE_PORT
-    print_header("Owner serve: API (separate process) + source audio downloader")
-    emit_log(f"API process started (PID {api_process.pid}), http://{SERVICE_HOST}:{SERVICE_PORT}", "info")
-    time.sleep(1.5)  # give API time to bind
-
-    try:
-        asyncio.run(
-            run_source_audio_downloader_standalone(
-                rounds=rounds,
-                initial_delay_sec=delay,
-            )
-        )
-    except KeyboardInterrupt:
-        pass
-    finally:
-        if api_process.is_alive():
-            emit_log("Stopping API process...", "info")
-            api_process.terminate()
-            api_process.join(timeout=5)
-            if api_process.is_alive():
-                api_process.kill()
-                api_process.join()
 
 
 @cli.group()
@@ -296,48 +208,6 @@ def get_miners():
             emit_log(f"{hotkey[:8]}: {model_name}@{model_revision} chute={chute_id} (block {commit_block})", "info")
 
     asyncio.run(run())
-
-
-# Corpus commands (audio source for evaluation)
-@cli.group()
-def corpus():
-    """Corpus management: run the LibriVox source audio downloader."""
-    pass
-
-
-@corpus.command("source-downloader")
-@click.option(
-    "--rounds",
-    type=int,
-    default=None,
-    help="Run N rounds then exit (default: run until Ctrl+C)",
-)
-@click.option(
-    "--delay",
-    type=float,
-    default=2.0,
-    help="Initial delay in seconds before first round (default: 2.0)",
-)
-def corpus_source_downloader(rounds, delay):
-    """Run the LibriVox source audio downloader (corpus bucket uploader).
-
-    Runs as a separate process: downloads chapters, extracts clips, uploads to
-    the Hippius corpus bucket, prunes when over AUDIO_CORPUS_MAX_ENTRIES.
-    Use owner Hippius credentials (HIPPIUS_OWNER_* or HIPPIUS_ACCESS_KEY).
-    """
-    from vocence.gateway.http.service.tasks.source_audio_downloader import (
-        run_source_audio_downloader_standalone,
-    )
-
-    try:
-        asyncio.run(
-            run_source_audio_downloader_standalone(
-                rounds=rounds,
-                initial_delay_sec=delay,
-            )
-        )
-    except KeyboardInterrupt:
-        pass
 
 
 # Miner commands

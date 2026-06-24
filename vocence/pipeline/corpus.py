@@ -10,21 +10,23 @@ AUDIO_CORPUS_MAX_ENTRIES (default 10,000) — clip-count limited, FIFO eviction.
 Producer:  run_corpus_manager()        -> continuous download/extract/prune loop
 Consumer:  prepare_source_audio(id)    -> copy a random unused clip to /tmp for a round
 
-This mirrors the previous owner-side SourceAudioDownloaderTask (LibriVox only,
-English-only, 20-25s clips, prune-oldest) but writes to local disk and is run by
-every validator independently. The LibriVox/ffmpeg helpers are reused unchanged.
+LibriVox-only, English-only, 20-25s clips, prune-oldest — run by every validator
+independently against local disk (no shared S3 corpus bucket).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
 import shutil
+import subprocess
 import tempfile
 import time
 import uuid
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.request import Request, urlopen
 
 from vocence.shared.logging import emit_log
 from vocence.domain.config import (
@@ -39,15 +41,91 @@ from vocence.domain.config import (
     MAX_AUDIO_HISTORY,
 )
 
-# Reuse the (pure) LibriVox + ffmpeg helpers from the existing downloader so there
-# is a single source of truth for how chapters are fetched and clips extracted.
-from vocence.gateway.http.service.tasks.source_audio_downloader import (
-    _pick_random_chapter_sync,
-    _download_librivox_chapter_sync,
-    _extract_clip_ffmpeg_sync,
-    _playtime_sec,
-    FFMPEG_DURATION_MARGIN_SEC,
-)
+# ---------------------------------------------------------------------------
+# LibriVox fetch + ffmpeg clip extraction (English-only, public domain audio).
+# Self-contained here so the validator has no dependency on the old owner-side
+# S3 corpus downloader.
+# ---------------------------------------------------------------------------
+LIBRIVOX_API = "https://librivox.org/api/feed/audiobooks"
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+# Margin (seconds) under max so ffmpeg frame/sample alignment cannot push duration over the limit.
+FFMPEG_DURATION_MARGIN_SEC = 0.05
+
+
+def _extract_clip_ffmpeg_sync(src_path: str, start_sec: float, duration_sec: float, out_path: str) -> bool:
+    """Extract one clip with ffmpeg (22050 Hz mono PCM16). Returns True on success.
+
+    duration_sec is capped so output stays within AUDIO_SOURCE_MAX_DURATION_SEC.
+    """
+    cap = max(0.0, float(AUDIO_SOURCE_MAX_DURATION_SEC) - FFMPEG_DURATION_MARGIN_SEC)
+    actual_dur = min(duration_sec, cap)
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-ss", str(start_sec), "-i", src_path,
+        "-t", str(round(actual_dur, 2)),
+        "-ar", "22050", "-ac", "1", "-c:a", "pcm_s16le",
+        out_path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, timeout=60)
+    return r.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0
+
+
+def _fetch_audiobooks_sync(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    """Fetch one page of LibriVox audiobooks with sections."""
+    url = f"{LIBRIVOX_API}/?limit={limit}&offset={offset}&format=json&extended=1"
+    req = Request(url, headers={"User-Agent": USER_AGENT})
+    with urlopen(req, timeout=30) as resp:
+        data = resp.read().decode("utf-8", errors="replace")
+    out = json.loads(data)
+    return out.get("books") or []
+
+
+def _playtime_sec(section: Dict[str, Any]) -> float:
+    try:
+        return float(section.get("playtime", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _pick_random_chapter_sync(
+    rng: random.Random,
+    min_duration_sec: float,
+    max_attempts: int = 20,
+) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """Pick a random English book and chapter with at least min_duration_sec."""
+    for _ in range(max_attempts):
+        offset = rng.randint(0, 500) * 50
+        books = _fetch_audiobooks_sync(limit=50, offset=offset)
+        if not books and offset > 0:
+            books = _fetch_audiobooks_sync(limit=50, offset=0)
+        if not books:
+            continue
+        books_en = [b for b in books if (b.get("language") or "").strip().lower() == "english"]
+        if not books_en:
+            continue
+        book = rng.choice(books_en)
+        sections = book.get("sections") or []
+        long_enough = [s for s in sections if _playtime_sec(s) >= min_duration_sec]
+        if not long_enough:
+            continue
+        section = rng.choice(long_enough)
+        return (book, section)
+    return None
+
+
+def _download_librivox_chapter_sync(listen_url: str, path: str) -> bool:
+    """Download chapter MP3 to path. Returns True on success."""
+    try:
+        req = Request(listen_url, headers={"User-Agent": USER_AGENT})
+        with urlopen(req, timeout=120) as resp:
+            data = resp.read()
+        if len(data) < 1000:
+            return False
+        with open(path, "wb") as f:
+            f.write(data)
+        return True
+    except Exception:
+        return False
 
 
 def _ensure_dir() -> str:

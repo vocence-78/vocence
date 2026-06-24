@@ -1,9 +1,8 @@
 """
 Hippius S3 storage utilities for Vocence.
 
-- Corpus bucket: use create_corpus_storage_client().
-  Owner (service): set HIPPIUS_OWNER_* (or HIPPIUS_ACCESS_KEY). Validator: set HIPPIUS_CORPUS_* (sub_key).
 - Validator's samples bucket: use create_validator_storage_client().
+- Reading peer validator buckets: use create_custom_storage_client(access, secret).
 """
 
 import os
@@ -15,10 +14,6 @@ from minio import Minio
 
 from vocence.domain.config import (
     AUDIO_SAMPLES_BUCKET,
-    HIPPIUS_OWNER_ACCESS_KEY,
-    HIPPIUS_OWNER_SECRET_KEY,
-    HIPPIUS_CORPUS_ACCESS_KEY,
-    HIPPIUS_CORPUS_SECRET_KEY,
     HIPPIUS_VALIDATOR_ACCESS_KEY,
     HIPPIUS_VALIDATOR_SECRET_KEY,
 )
@@ -43,32 +38,13 @@ def create_custom_storage_client(access_key: str, secret_key: str) -> Minio:
     return _minio_client(access_key, secret_key)
 
 
-def create_corpus_storage_client() -> Minio:
-    """Create a Minio client for the corpus bucket.
-    
-    Owner (service): uses HIPPIUS_OWNER_* or HIPPIUS_ACCESS_KEY (writes to corpus).
-    Validator: uses HIPPIUS_CORPUS_* (owner-provided sub_key, read-only) when set.
-    """
-    if HIPPIUS_CORPUS_ACCESS_KEY:
-        return _minio_client(HIPPIUS_CORPUS_ACCESS_KEY, HIPPIUS_CORPUS_SECRET_KEY)
-    return _minio_client(HIPPIUS_OWNER_ACCESS_KEY, HIPPIUS_OWNER_SECRET_KEY)
-
-
 def create_validator_storage_client() -> Minio:
     """Create a Minio client with validator's own credentials (samples bucket, etc.).
-    
+
     Use on validator for uploading samples and any validator-owned storage.
     Env: HIPPIUS_VALIDATOR_ACCESS_KEY, HIPPIUS_VALIDATOR_SECRET_KEY (or legacy HIPPIUS_ACCESS_KEY, HIPPIUS_SECRET_KEY).
     """
     return _minio_client(HIPPIUS_VALIDATOR_ACCESS_KEY, HIPPIUS_VALIDATOR_SECRET_KEY)
-
-
-def create_storage_client() -> Minio:
-    """Create corpus bucket client (backward compatibility).
-    
-    Alias for create_corpus_storage_client().
-    """
-    return create_corpus_storage_client()
 
 
 async def ensure_bucket_available(storage_client: Minio, bucket_name: str) -> None:

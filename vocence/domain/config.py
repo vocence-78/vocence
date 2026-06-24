@@ -80,26 +80,13 @@ HOTKEY_NAME = os.environ.get("HOTKEY_NAME", "default")
 # Set VALIDATOR_NAME in .env (e.g. rt21, yuma, rizzo, kraken); validators typically set this.
 VALIDATOR_NAME = (os.environ.get("VALIDATOR_NAME", "default").strip().lower().replace("_", "-") or "default")
 
-# Bucket names (shared)
-AUDIO_SOURCE_BUCKET = os.environ.get("HIPPIUS_AUDIO_SOURCE_BUCKET", "audio-corpus-bucket")  # Corpus (owner writes, validators read)
+# Bucket names
 # Validator's own bucket: derived from VALIDATOR_NAME unless overridden (e.g. vocence-samples-rt21, vocence-samples-yuma).
 AUDIO_SAMPLES_BUCKET = os.environ.get("AUDIO_SAMPLES_BUCKET") or f"vocence-samples-{VALIDATOR_NAME}"
 
-# Owner: single set for corpus bucket (used by source-downloader CLI)
-HIPPIUS_OWNER_ACCESS_KEY = os.environ.get("HIPPIUS_OWNER_ACCESS_KEY") or os.environ.get("HIPPIUS_ACCESS_KEY", "")
-HIPPIUS_OWNER_SECRET_KEY = os.environ.get("HIPPIUS_OWNER_SECRET_KEY") or os.environ.get("HIPPIUS_SECRET_KEY", "")
-
-# Validator: corpus access (owner-provided sub_key, read-only for corpus bucket)
-HIPPIUS_CORPUS_ACCESS_KEY = os.environ.get("HIPPIUS_CORPUS_ACCESS_KEY", "")
-HIPPIUS_CORPUS_SECRET_KEY = os.environ.get("HIPPIUS_CORPUS_SECRET_KEY", "")
-
-# Validator: validator's own credentials (samples bucket, uploads, etc.)
+# Validator's own credentials (samples bucket, uploads, reading peer buckets).
 HIPPIUS_VALIDATOR_ACCESS_KEY = os.environ.get("HIPPIUS_VALIDATOR_ACCESS_KEY") or os.environ.get("HIPPIUS_ACCESS_KEY", "")
 HIPPIUS_VALIDATOR_SECRET_KEY = os.environ.get("HIPPIUS_VALIDATOR_SECRET_KEY") or os.environ.get("HIPPIUS_SECRET_KEY", "")
-
-# Legacy (deprecated): use OWNER_* or VALIDATOR_* / CORPUS_* depending on role
-HIPPIUS_ACCESS_KEY = HIPPIUS_OWNER_ACCESS_KEY  # backward compat; validator code uses create_*_storage_client()
-HIPPIUS_SECRET_KEY = HIPPIUS_OWNER_SECRET_KEY
 
 # OpenAI configuration (OPENAI_AUTH_KEY or OPENAI_API_KEY from .env)
 OPENAI_AUTH_KEY = os.environ.get("OPENAI_AUTH_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -251,12 +238,8 @@ REPO_REQUIRED_FILES = frozenset({
 HF_AUTH_TOKEN = os.environ.get("HF_AUTH_TOKEN")
 MODEL_FINGERPRINT_CACHE_TTL = int(os.environ.get("MODEL_FINGERPRINT_CACHE_TTL", "3600"))  # 1 hour
 
-# Source audio downloader (LibriVox only)
+# Local audio corpus (per-validator LibriVox source clips on disk)
 AUDIO_CORPUS_MAX_ENTRIES = int(os.environ.get("AUDIO_CORPUS_MAX_ENTRIES", "10000"))  # Max clips in corpus; prune oldest when exceeded
-AUDIO_CORPUS_MANIFEST_PATH = os.environ.get(
-    "AUDIO_CORPUS_MANIFEST_PATH",
-    os.path.join(os.getcwd(), "data", "audio_corpus_manifest.json"),
-)
 # Local corpus directory: each validator maintains its own source-audio corpus on disk
 # (English LibriVox clips, 20-25s) instead of reading from a shared S3 corpus bucket.
 CORPUS_LOCAL_DIR = os.environ.get("CORPUS_LOCAL_DIR", os.path.join(os.getcwd(), "data", "corpus"))
