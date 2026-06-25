@@ -13,18 +13,21 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import random
 from typing import List
 
 from vocence.shared.logging import emit_log
 from vocence.domain.config import (
     REGISTRY_DB_PATH,
     BLOCKLIST_CACHE_PATH,
-    PARTICIPANT_VALIDATION_INTERVAL,
+    REGISTRY_VALIDATION_INTERVAL_BLOCKS,
+    REGISTRY_VALIDATION_MAX_LAG_BLOCKS,
+    CHAIN_NETWORK,
+    SUBTENSOR_TIMEOUT_SEC,
     API_URL,
     COLDKEY_NAME,
     HOTKEY_NAME,
 )
+from vocence.engine.block_clock import SECONDS_PER_BLOCK
 from vocence.domain.entities import ParticipantInfo
 
 _initialized = False
@@ -135,26 +138,82 @@ async def _sync_blacklist_to_local_db() -> None:
         await repo.remove_entry(hk)
 
 
-async def run_miner_registry() -> None:
-    """Validate miners locally and persist to SQLite, every interval with jitter.
+async def run_miner_registry(get_block=None, subtensor_ref=None) -> None:
+    """Validate miners on chain-block boundaries, pinned to the boundary block.
 
-    Reuses the owner API's ParticipantValidationTask verbatim (only the DB differs).
+    Every validator computes the same boundaries (block % INTERVAL == 0, offset 0) and
+    validates commitments+metagraph pinned to that block, so independent validators
+    read the identical snapshot and converge on the same valid-miner set. Reuses the
+    owner API's ParticipantValidationTask verbatim (only the DB + snapshot block differ).
+
+    get_block / subtensor_ref are injected by `serve` (shared block clock + connection).
+    When run standalone they default to a private connection.
     """
+    import bittensor as bt
+
     await init_local_registry()
     from vocence.gateway.http.service.tasks.participant_validation import (
         ParticipantValidationTask,
     )
 
+    own_subtensor = subtensor_ref is None
+    if own_subtensor:
+        subtensor_ref = {"client": bt.AsyncSubtensor(network=CHAIN_NETWORK)}
+    if get_block is None:
+        async def get_block():
+            return await asyncio.wait_for(
+                subtensor_ref["client"].get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC
+            )
+
+    interval = REGISTRY_VALIDATION_INTERVAL_BLOCKS
     task = ParticipantValidationTask()
-    await asyncio.sleep(random.random() * 120)  # jitter so validators don't sync their first pass
-    emit_log("Local miner registry loop starting", "start")
-    while True:
-        try:
-            await _sync_blacklist_to_local_db()
-            await task._validate_participants()
-        except asyncio.CancelledError:
-            emit_log("Local miner registry cancelled", "warn")
-            raise
-        except Exception as e:
-            emit_log(f"Local registry pass failed ({e}); retry next interval", "warn")
-        await asyncio.sleep(PARTICIPANT_VALIDATION_INTERVAL * (1.0 + random.random() * 0.25))
+    last_boundary = None
+    emit_log(
+        f"Local miner registry loop starting (every {interval} blocks, snapshot-pinned, "
+        f"max_lag={REGISTRY_VALIDATION_MAX_LAG_BLOCKS})",
+        "start",
+    )
+    try:
+        while True:
+            try:
+                block = await get_block()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                block = None
+            if block is None:
+                await asyncio.sleep(SECONDS_PER_BLOCK)
+                continue
+
+            boundary = (block // interval) * interval
+            if boundary != last_boundary:
+                # Pin to the boundary when recent enough (synced across validators).
+                # On first boot in a stale window, pin to current so we warm up
+                # immediately and resync at the next boundary; otherwise skip (the
+                # validator was down — don't query pruned state).
+                if block - boundary <= REGISTRY_VALIDATION_MAX_LAG_BLOCKS:
+                    pin = boundary
+                elif last_boundary is None:
+                    pin = block
+                else:
+                    pin = None
+                if pin is not None:
+                    try:
+                        await _sync_blacklist_to_local_db()
+                        await task._validate_participants(subtensor=subtensor_ref["client"], block=pin)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        emit_log(f"Local registry pass failed ({e}); retry", "warn")
+                else:
+                    emit_log(
+                        f"Skipping stale validation boundary {boundary} (block {block})", "warn"
+                    )
+                last_boundary = boundary
+            await asyncio.sleep(SECONDS_PER_BLOCK)
+    finally:
+        if own_subtensor:
+            try:
+                await subtensor_ref["client"].close()
+            except Exception:
+                pass

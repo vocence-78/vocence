@@ -172,6 +172,12 @@ REGISTRY_DB_PATH = os.environ.get("REGISTRY_DB_PATH", os.path.join(os.getcwd(), 
 BLOCKLIST_CACHE_PATH = os.environ.get("BLOCKLIST_CACHE_PATH", os.path.join(os.getcwd(), "data", "blocklist_cache.json"))
 # Min stake for a peer validator's bucket to count as active at weight-set time.
 ACTIVE_VALIDATOR_MIN_STAKE = float(os.environ.get("ACTIVE_VALIDATOR_MIN_STAKE", "0"))
+# Block-aligned miner validation so all validators validate the same on-chain snapshot.
+# Validate at each block boundary (block % INTERVAL == 0), pinning commitments+metagraph
+# to that block. Offset is 0 for everyone (aligned, not staggered). MAX_LAG keeps the
+# pinned block within node state-pruning (~256 blocks) so it stays queryable.
+REGISTRY_VALIDATION_INTERVAL_BLOCKS = int(os.environ.get("REGISTRY_VALIDATION_INTERVAL_BLOCKS", "300"))
+REGISTRY_VALIDATION_MAX_LAG_BLOCKS = int(os.environ.get("REGISTRY_VALIDATION_MAX_LAG_BLOCKS", "200"))
 
 # Auth (owner API)
 SIGNATURE_EXPIRY_SECONDS = int(os.environ.get("SIGNATURE_EXPIRY_SECONDS", "300"))
