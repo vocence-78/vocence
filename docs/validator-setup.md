@@ -7,7 +7,7 @@ This guide covers running a Vocence validator using **Docker** and **Watchtower*
 ## Prerequisites
 
 - **From the Vocence team:** Chutes permission, owner API URL (`API_URL`, used only for the dashboard + centralized blacklist — not for scoring), Hippius validator bucket keys (for your own samples), and readonly validator-bucket credentials for the active validator set. (No corpus-bucket keys needed — source audio is built locally.)
-- **HuggingFace token (`HF_AUTH_TOKEN`):** validators now validate miner model repos themselves (download + fingerprint), so each validator needs its own HF token.
+- **HuggingFace token (`HF_AUTH_TOKEN`) — optional:** validators validate miner model repos themselves (download + fingerprint), but miner repos are public so anonymous access works. Set a token only if you want HuggingFace's higher (authenticated) rate limit; each model revision is downloaded once and cached, so anonymous is usually fine.
 - **Your side:** Bittensor wallet (coldkey + hotkey), Docker and Docker Compose installed, ~12 GB free disk for `./data`.
 
 ---
