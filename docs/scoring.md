@@ -10,7 +10,7 @@ Vocence uses a two-stage validator flow:
 
 1. **Sample generation**
    Each validator generates its own evaluation samples:
-   - download random source audio from the corpus bucket
+   - pick random source audio from its local corpus (per-validator LibriVox clips on disk)
    - extract a task spec from the source audio via gpt-audio-1.5
    - call miners' `/speak` endpoints with that spec
    - extract the same fields from each miner's audio and score element-by-element against the spec
@@ -34,14 +34,15 @@ This design is intended to reduce drift between honest validators on a winner-ta
 
 ## How Tasks Are Generated
 
-Each validator generates evaluation tasks from real source audio in the shared corpus bucket.
+Each validator generates evaluation tasks from real source audio in its own local corpus.
 
 ### Source audio selection
 
-Validators pull source audio from the Hippius corpus bucket:
+Each validator maintains its own local audio corpus on disk (English LibriVox clips,
+20-25s), downloaded and pruned in the background — no shared corpus bucket:
 
-- bucket: `AUDIO_SOURCE_BUCKET`
-- access: `HIPPIUS_CORPUS_*`
+- directory: `CORPUS_LOCAL_DIR` (default `./data/corpus`)
+- size cap: `AUDIO_CORPUS_MAX_ENTRIES` clips (default 10000, oldest pruned first)
 
 The validator selects a random `.wav` file from the corpus while avoiding recently used items in memory. The source file must pass the validator-side duration checks:
 
@@ -230,9 +231,9 @@ Default:
 
 For each active validator, the validator weight is derived from the current subnet metagraph:
 
-- `validator_weight = sqrt(stake)`
+- `validator_weight = stake ** VALIDATOR_WEIGHT_EXPONENT` (default exponent `0.25`, i.e. fourth-root of stake)
 
-If all validator stakes resolve to zero or are unavailable, scoring falls back to equal weights.
+The exponent compresses the gap between large- and small-stake validators while preserving stake ordering; it is configurable via `VALIDATOR_WEIGHT_EXPONENT` (`0.5` = sqrt, `1.0` = linear). If all validator stakes resolve to zero or are unavailable, scoring falls back to equal weights.
 
 For each miner:
 
@@ -243,9 +244,9 @@ Formula:
 
 ```text
 global_win_rate(miner) =
-  sum(sqrt(stake_v) * win_rate_v)
+  sum(stake_v**0.25 * win_rate_v)
   /
-  sum(sqrt(stake_v))
+  sum(stake_v**0.25)
 ```
 
 Only validators that actually contributed data for that miner are included in the denominator.

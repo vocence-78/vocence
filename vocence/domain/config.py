@@ -56,6 +56,11 @@ COMMIT_LOCK_BLOCK = int(os.environ.get("COMMIT_LOCK_BLOCK", "8270310"))
 MAX_POST_CUTOVER_COMMITS = int(os.environ.get("MAX_POST_CUTOVER_COMMITS", "2"))
 # Most recent N evaluations used for scoring (validator S3 + owner metrics). Default 50.
 MAX_EVALS_FOR_SCORING = int(os.environ.get("MAX_EVALS_FOR_SCORING", "50"))
+# Exponent applied to validator stake to derive its weight in global scoring:
+# weight = stake ** VALIDATOR_WEIGHT_EXPONENT. Lower exponent compresses the gap
+# between large- and small-stake validators (0.5 = sqrt, 0.25 = fourth root,
+# 1.0 = linear). Default 0.25 keeps stake ordering while tightening influence spread.
+VALIDATOR_WEIGHT_EXPONENT = float(os.environ.get("VALIDATOR_WEIGHT_EXPONENT", "0.25"))
 
 # Chutes API configuration
 CHUTES_BASE_URL = os.environ.get("CHUTES_BASE_URL", "https://api.chutes.ai")
@@ -75,26 +80,13 @@ HOTKEY_NAME = os.environ.get("HOTKEY_NAME", "default")
 # Set VALIDATOR_NAME in .env (e.g. rt21, yuma, rizzo, kraken); validators typically set this.
 VALIDATOR_NAME = (os.environ.get("VALIDATOR_NAME", "default").strip().lower().replace("_", "-") or "default")
 
-# Bucket names (shared)
-AUDIO_SOURCE_BUCKET = os.environ.get("HIPPIUS_AUDIO_SOURCE_BUCKET", "audio-corpus-bucket")  # Corpus (owner writes, validators read)
+# Bucket names
 # Validator's own bucket: derived from VALIDATOR_NAME unless overridden (e.g. vocence-samples-rt21, vocence-samples-yuma).
 AUDIO_SAMPLES_BUCKET = os.environ.get("AUDIO_SAMPLES_BUCKET") or f"vocence-samples-{VALIDATOR_NAME}"
 
-# Owner: single set for corpus bucket (used by source-downloader CLI)
-HIPPIUS_OWNER_ACCESS_KEY = os.environ.get("HIPPIUS_OWNER_ACCESS_KEY") or os.environ.get("HIPPIUS_ACCESS_KEY", "")
-HIPPIUS_OWNER_SECRET_KEY = os.environ.get("HIPPIUS_OWNER_SECRET_KEY") or os.environ.get("HIPPIUS_SECRET_KEY", "")
-
-# Validator: corpus access (owner-provided sub_key, read-only for corpus bucket)
-HIPPIUS_CORPUS_ACCESS_KEY = os.environ.get("HIPPIUS_CORPUS_ACCESS_KEY", "")
-HIPPIUS_CORPUS_SECRET_KEY = os.environ.get("HIPPIUS_CORPUS_SECRET_KEY", "")
-
-# Validator: validator's own credentials (samples bucket, uploads, etc.)
+# Validator's own credentials (samples bucket, uploads, reading peer buckets).
 HIPPIUS_VALIDATOR_ACCESS_KEY = os.environ.get("HIPPIUS_VALIDATOR_ACCESS_KEY") or os.environ.get("HIPPIUS_ACCESS_KEY", "")
 HIPPIUS_VALIDATOR_SECRET_KEY = os.environ.get("HIPPIUS_VALIDATOR_SECRET_KEY") or os.environ.get("HIPPIUS_SECRET_KEY", "")
-
-# Legacy (deprecated): use OWNER_* or VALIDATOR_* / CORPUS_* depending on role
-HIPPIUS_ACCESS_KEY = HIPPIUS_OWNER_ACCESS_KEY  # backward compat; validator code uses create_*_storage_client()
-HIPPIUS_SECRET_KEY = HIPPIUS_OWNER_SECRET_KEY
 
 # OpenAI configuration (OPENAI_AUTH_KEY or OPENAI_API_KEY from .env)
 OPENAI_AUTH_KEY = os.environ.get("OPENAI_AUTH_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -172,6 +164,21 @@ LOG_DIR = os.environ.get("LOG_DIR", "logs")
 PARTICIPANT_VALIDATION_INTERVAL = int(os.environ.get("PARTICIPANT_VALIDATION_INTERVAL", "3600"))
 METRICS_CALCULATION_INTERVAL = int(os.environ.get("METRICS_CALCULATION_INTERVAL", "1800"))
 
+# Local miner registry: validators validate miners themselves into a local SQLite DB
+# instead of calling the owner API (set false to fall back to the API).
+USE_LOCAL_REGISTRY = (os.environ.get("USE_LOCAL_REGISTRY", "true").lower() == "true")
+REGISTRY_DB_PATH = os.environ.get("REGISTRY_DB_PATH", os.path.join(os.getcwd(), "data", "registry.sqlite"))
+# Centralized blacklist cached on disk (fail to last-known on API outage).
+BLOCKLIST_CACHE_PATH = os.environ.get("BLOCKLIST_CACHE_PATH", os.path.join(os.getcwd(), "data", "blocklist_cache.json"))
+# Min stake for a peer validator's bucket to count as active at weight-set time.
+ACTIVE_VALIDATOR_MIN_STAKE = float(os.environ.get("ACTIVE_VALIDATOR_MIN_STAKE", "0"))
+# Block-aligned miner validation so all validators validate the same on-chain snapshot.
+# Validate at each block boundary (block % INTERVAL == 0), pinning commitments+metagraph
+# to that block. Offset is 0 for everyone (aligned, not staggered). MAX_LAG keeps the
+# pinned block within node state-pruning (~256 blocks) so it stays queryable.
+REGISTRY_VALIDATION_INTERVAL_BLOCKS = int(os.environ.get("REGISTRY_VALIDATION_INTERVAL_BLOCKS", "300"))
+REGISTRY_VALIDATION_MAX_LAG_BLOCKS = int(os.environ.get("REGISTRY_VALIDATION_MAX_LAG_BLOCKS", "200"))
+
 # Auth (owner API)
 SIGNATURE_EXPIRY_SECONDS = int(os.environ.get("SIGNATURE_EXPIRY_SECONDS", "300"))
 ADMIN_HOTKEYS = [x.strip() for x in os.environ.get("ADMIN_HOTKEYS", "").split(",") if x.strip()]
@@ -246,13 +253,18 @@ REPO_REQUIRED_FILES = frozenset({
 HF_AUTH_TOKEN = os.environ.get("HF_AUTH_TOKEN")
 MODEL_FINGERPRINT_CACHE_TTL = int(os.environ.get("MODEL_FINGERPRINT_CACHE_TTL", "3600"))  # 1 hour
 
-# Source audio downloader (LibriVox only)
-AUDIO_CORPUS_MAX_ENTRIES = int(os.environ.get("AUDIO_CORPUS_MAX_ENTRIES", "1000000"))  # Max clips in corpus; prune oldest when exceeded
-AUDIO_CORPUS_MANIFEST_PATH = os.environ.get(
-    "AUDIO_CORPUS_MANIFEST_PATH",
-    os.path.join(os.getcwd(), "data", "audio_corpus_manifest.json"),
-)
-SOURCE_AUDIO_DOWNLOAD_INTERVAL = int(os.environ.get("SOURCE_AUDIO_DOWNLOAD_INTERVAL", "60"))  # Seconds between rounds
+# Local audio corpus (per-validator LibriVox source clips on disk)
+AUDIO_CORPUS_MAX_ENTRIES = int(os.environ.get("AUDIO_CORPUS_MAX_ENTRIES", "10000"))  # Max clips in corpus; prune oldest when exceeded
+# Local corpus directory: each validator maintains its own source-audio corpus on disk
+# (English LibriVox clips, 20-25s) instead of reading from a shared S3 corpus bucket.
+CORPUS_LOCAL_DIR = os.environ.get("CORPUS_LOCAL_DIR", os.path.join(os.getcwd(), "data", "corpus"))
+# Download cadence. While BELOW the cap, pull a chapter every SOURCE_AUDIO_DOWNLOAD_INTERVAL
+# seconds to fill quickly. Once AT the cap, switch to a slow freshness rotation every
+# CORPUS_REFRESH_INTERVAL_SEC seconds so we don't hammer LibriVox (a free service) forever.
+SOURCE_AUDIO_DOWNLOAD_INTERVAL = int(os.environ.get("SOURCE_AUDIO_DOWNLOAD_INTERVAL", "60"))  # fill mode (below cap)
+CORPUS_REFRESH_INTERVAL_SEC = int(os.environ.get("CORPUS_REFRESH_INTERVAL_SEC", "3600"))  # maintenance mode (at cap)
+# Backoff (seconds) applied when LibriVox rate-limits us (HTTP 429); doubles up to this cap.
+CORPUS_RATE_LIMIT_BACKOFF_SEC = int(os.environ.get("CORPUS_RATE_LIMIT_BACKOFF_SEC", "900"))
 LIBRIVOX_CLIPS_PER_CHAPTER = int(os.environ.get("LIBRIVOX_CLIPS_PER_CHAPTER", "10"))
 LIBRIVOX_CLIP_MIN_SEC = int(os.environ.get("LIBRIVOX_CLIP_MIN_SEC", "20"))
 LIBRIVOX_CLIP_MAX_SEC = int(os.environ.get("LIBRIVOX_CLIP_MAX_SEC", "25"))

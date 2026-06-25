@@ -66,8 +66,15 @@ class ParticipantValidationTask:
         """Stop the worker."""
         self._running = False
     
-    async def _validate_participants(self) -> None:
-        """Validate all participants from metagraph."""
+    async def _validate_participants(self, subtensor=None, block=None) -> None:
+        """Validate all participants from metagraph.
+
+        subtensor: reuse a shared AsyncSubtensor (validators) instead of opening one
+            (owner API default = None -> own connection, closed at the end).
+        block: pin commitments + metagraph to this block so all validators that
+            validate the same boundary read the identical on-chain snapshot
+            (default None -> current block).
+        """
         print_header("Participant Validation Sync")
         emit_log(
             "Owner checks per miner: chute_fetch, wrapper_integrity, chute_hot, "
@@ -78,19 +85,23 @@ class ParticipantValidationTask:
             "info",
         )
 
-        # Connect to subtensor
-        subtensor = bt.AsyncSubtensor(network=CHAIN_NETWORK)
-        
+        # Reuse a shared subtensor when provided (validators); otherwise open our own
+        # (owner API) and close it at the end.
+        own_subtensor = subtensor is None
+        if own_subtensor:
+            subtensor = bt.AsyncSubtensor(network=CHAIN_NETWORK)
+
         try:
-            # Get current block and commitments
-            current_block = await subtensor.get_current_block()
-            commits = await subtensor.get_all_revealed_commitments(SUBNET_ID, block=current_block)
-            
+            # Pin to the given block (so independent validators read the same snapshot)
+            # or fall back to the current block.
+            snapshot_block = block if block is not None else await subtensor.get_current_block()
+            commits = await subtensor.get_all_revealed_commitments(SUBNET_ID, block=snapshot_block)
+
             if not commits:
                 emit_log("No participant commitments found (will still inject owner base model if configured)", "warn")
             commits = commits or {}
 
-            meta = await subtensor.metagraph(SUBNET_ID)
+            meta = await subtensor.metagraph(SUBNET_ID, block=snapshot_block)
             
             # Get blocklist
             blocked_participants = await self.blocklist_repo.fetch_blocked_hotkeys()
@@ -233,5 +244,6 @@ class ParticipantValidationTask:
             emit_log(f"Validated {len(validated_participants)} participants: {valid_count} valid, {invalid_count} invalid", "success")
             
         finally:
-            await subtensor.close()
+            if own_subtensor:
+                await subtensor.close()
 

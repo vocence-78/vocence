@@ -1,7 +1,7 @@
 """
 CLI interface for Vocence.
 
-Provides commands for running the validator, owner (API + source downloader),
+Provides commands for running the validator, the HTTP API (dashboard/metrics),
 miner (push/commit), and queries.
 
 When you add or change commands or options, update the CLI reference:
@@ -50,99 +50,11 @@ def serve():
 @cli.command("api")
 def api():
     """Start the HTTP API only (participants, evaluations, metrics, blocklist).
-    
-    Single process. For owner, use `vocence owner serve` to run API + downloader
-    in separate processes.
+
+    Single process. Dashboard/metrics service only — validators run independently.
     """
     from vocence.gateway.http.service.app import run_service
     run_service()
-
-
-# Owner commands (corpus bucket owner: run all owner-side processes)
-@cli.group()
-def owner():
-    """Corpus owner: run all processes that populate the Hippius corpus bucket.
-    
-    Use owner Hippius credentials (HIPPIUS_OWNER_* or HIPPIUS_ACCESS_KEY).
-    """
-    pass
-
-
-@owner.command("serve")
-@click.option(
-    "--rounds",
-    type=int,
-    default=None,
-    help="Run N rounds then exit (default: run until Ctrl+C)",
-)
-@click.option(
-    "--delay",
-    type=float,
-    default=2.0,
-    help="Initial delay in seconds before first round (default: 2.0)",
-)
-@click.option(
-    "--no-api",
-    is_flag=True,
-    help="Run only the source audio downloader (no HTTP API). Use when API runs elsewhere.",
-)
-def owner_serve(rounds, delay, no_api):
-    """Run all owner processes in separate processes: API + source audio downloader.
-    
-    By default starts two processes:
-    - Process 1: HTTP API (participants, evaluations, metrics, blocklist) on SERVICE_PORT (default 8000)
-    - Process 2: Source audio downloader (LibriVox → corpus bucket, prune when over limit)
-    
-    Use --no-api to run only the downloader (e.g. if the API is already running).
-    """
-    import os
-    import multiprocessing
-    import time
-
-    from vocence.shared.logging import emit_log, print_header
-    from vocence.gateway.http.service.tasks.source_audio_downloader import (
-        run_source_audio_downloader_standalone,
-    )
-
-    if no_api:
-        try:
-            asyncio.run(
-                run_source_audio_downloader_standalone(
-                    rounds=rounds,
-                    initial_delay_sec=delay,
-                )
-            )
-        except KeyboardInterrupt:
-            pass
-        return
-
-    # Start API in a separate process
-    from vocence.gateway.http.service.app import run_service
-
-    api_process = multiprocessing.Process(target=run_service)
-    api_process.start()
-    from vocence.domain.config import SERVICE_HOST, SERVICE_PORT
-    print_header("Owner serve: API (separate process) + source audio downloader")
-    emit_log(f"API process started (PID {api_process.pid}), http://{SERVICE_HOST}:{SERVICE_PORT}", "info")
-    time.sleep(1.5)  # give API time to bind
-
-    try:
-        asyncio.run(
-            run_source_audio_downloader_standalone(
-                rounds=rounds,
-                initial_delay_sec=delay,
-            )
-        )
-    except KeyboardInterrupt:
-        pass
-    finally:
-        if api_process.is_alive():
-            emit_log("Stopping API process...", "info")
-            api_process.terminate()
-            api_process.join(timeout=5)
-            if api_process.is_alive():
-                api_process.kill()
-                api_process.join()
 
 
 @cli.group()
@@ -166,10 +78,13 @@ def start_generator():
     from openai import AsyncOpenAI
 
     import asyncio
-    from vocence.domain.config import OPENAI_AUTH_KEY, CHUTES_AUTH_KEY, CHAIN_NETWORK, SUBTENSOR_TIMEOUT_SEC
+    from vocence.domain.config import OPENAI_AUTH_KEY, CHUTES_AUTH_KEY, CHAIN_NETWORK, USE_LOCAL_REGISTRY
     from vocence.shared.logging import emit_log, print_header
-    from vocence.adapters.storage import create_corpus_storage_client, create_validator_storage_client
+    from vocence.adapters.storage import create_validator_storage_client
     from vocence.pipeline.generation import generate_samples_continuously
+    from vocence.pipeline.corpus import run_corpus_manager
+    from vocence.engine.block_clock import BlockClock, run_block_poller
+    from vocence.engine.coordinator import _reconnect_subtensor
 
     async def run_generator():
         print_header("Vocence Prompt Generator Starting")
@@ -181,19 +96,74 @@ def start_generator():
             emit_log("OPENAI_AUTH_KEY environment variable required", "error")
             return
 
-        subtensor = bt.AsyncSubtensor(network=CHAIN_NETWORK)
-        corpus_client = create_corpus_storage_client()
+        # One connection + one block poller; tasks read the shared clock.
+        subtensor_ref = {"client": bt.AsyncSubtensor(network=CHAIN_NETWORK)}
+        clock = BlockClock()
         validator_client = create_validator_storage_client()
         openai_client = AsyncOpenAI(api_key=OPENAI_AUTH_KEY)
 
-        async def get_block_with_timeout():
-            return await asyncio.wait_for(subtensor.get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC)
-
-        await generate_samples_continuously(
-            corpus_client, validator_client, openai_client, get_block_with_timeout
-        )
+        bg_tasks = [
+            asyncio.create_task(run_block_poller(subtensor_ref, clock, _reconnect_subtensor)),
+            asyncio.create_task(run_corpus_manager()),
+        ]
+        if USE_LOCAL_REGISTRY:
+            from vocence.registry.local_registry import run_miner_registry
+            bg_tasks.append(asyncio.create_task(run_miner_registry(get_block=clock.get_async, subtensor_ref=subtensor_ref)))
+        try:
+            await generate_samples_continuously(
+                validator_client, openai_client, clock.get_async
+            )
+        finally:
+            for t in bg_tasks:
+                t.cancel()
 
     asyncio.run(run_generator())
+
+
+@services.command("corpus")
+def start_corpus():
+    """Start the local audio corpus manager only.
+
+    Continuously downloads English LibriVox clips (20-25s) into the local corpus
+    directory (CORPUS_LOCAL_DIR) and prunes oldest clips beyond AUDIO_CORPUS_MAX_ENTRIES.
+    Run this as a standalone process when generation and corpus upkeep are split.
+    """
+    import asyncio
+    from vocence.shared.logging import print_header
+    from vocence.pipeline.corpus import run_corpus_manager
+
+    async def run():
+        print_header("Vocence Local Corpus Manager Starting")
+        await run_corpus_manager()
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        pass
+
+
+@services.command("registry")
+def start_registry():
+    """Start the local miner registry only.
+
+    Validates miners from chain commitments (HuggingFace + Chutes + duplicate
+    detection), mirrors the central blacklist, and writes valid miners to the local
+    SQLite registry (REGISTRY_DB_PATH). 'serve', 'services generator', and
+    'services validator' already run this in the background; use this to run it as a
+    standalone process when splitting services.
+    """
+    import asyncio
+    from vocence.shared.logging import print_header
+    from vocence.registry.local_registry import run_miner_registry
+
+    async def run():
+        print_header("Vocence Local Miner Registry Starting")
+        await run_miner_registry()
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        pass
 
 
 @services.command("validator")
@@ -204,23 +174,33 @@ def start_validator():
     Does NOT generate samples - use this with a separate generator instance.
     """
     import bittensor as bt
-    
-    from vocence.domain.config import CHAIN_NETWORK, COLDKEY_NAME, HOTKEY_NAME
+
+    from vocence.domain.config import CHAIN_NETWORK, COLDKEY_NAME, HOTKEY_NAME, USE_LOCAL_REGISTRY
     from vocence.shared.logging import emit_log, print_header
     from vocence.adapters.storage import create_validator_storage_client
-    from vocence.engine.coordinator import cycle_step
-    
+    from vocence.engine.coordinator import cycle_step, _reconnect_subtensor
+    from vocence.engine.block_clock import BlockClock, run_block_poller
+
     async def run_validator():
         print_header("Vocence Validator (Weight Setter) Starting")
-        # Use ref so cycle_step can reconnect on timeout
+        # One connection + one block poller; cycle_step and the registry read the clock.
         subtensor_ref = {"client": bt.AsyncSubtensor(network=CHAIN_NETWORK)}
+        clock = BlockClock()
         wallet = bt.Wallet(name=COLDKEY_NAME, hotkey=HOTKEY_NAME)
         validator_client = create_validator_storage_client()
         emit_log(f"Wallet: {COLDKEY_NAME}/{HOTKEY_NAME}", "info")
         emit_log(f"Network: {CHAIN_NETWORK}", "info")
-        while True:
-            await cycle_step(subtensor_ref, wallet, validator_client)
-    
+        bg_tasks = [asyncio.create_task(run_block_poller(subtensor_ref, clock, _reconnect_subtensor))]
+        if USE_LOCAL_REGISTRY:
+            from vocence.registry.local_registry import run_miner_registry
+            bg_tasks.append(asyncio.create_task(run_miner_registry(get_block=clock.get_async, subtensor_ref=subtensor_ref)))
+        try:
+            while True:
+                await cycle_step(subtensor_ref, wallet, validator_client, clock.get_async)
+        finally:
+            for t in bg_tasks:
+                t.cancel()
+
     asyncio.run(run_validator())
 
 
@@ -269,48 +249,6 @@ def get_miners():
             emit_log(f"{hotkey[:8]}: {model_name}@{model_revision} chute={chute_id} (block {commit_block})", "info")
 
     asyncio.run(run())
-
-
-# Corpus commands (audio source for evaluation)
-@cli.group()
-def corpus():
-    """Corpus management: run the LibriVox source audio downloader."""
-    pass
-
-
-@corpus.command("source-downloader")
-@click.option(
-    "--rounds",
-    type=int,
-    default=None,
-    help="Run N rounds then exit (default: run until Ctrl+C)",
-)
-@click.option(
-    "--delay",
-    type=float,
-    default=2.0,
-    help="Initial delay in seconds before first round (default: 2.0)",
-)
-def corpus_source_downloader(rounds, delay):
-    """Run the LibriVox source audio downloader (corpus bucket uploader).
-
-    Runs as a separate process: downloads chapters, extracts clips, uploads to
-    the Hippius corpus bucket, prunes when over AUDIO_CORPUS_MAX_ENTRIES.
-    Use owner Hippius credentials (HIPPIUS_OWNER_* or HIPPIUS_ACCESS_KEY).
-    """
-    from vocence.gateway.http.service.tasks.source_audio_downloader import (
-        run_source_audio_downloader_standalone,
-    )
-
-    try:
-        asyncio.run(
-            run_source_audio_downloader_standalone(
-                rounds=rounds,
-                initial_delay_sec=delay,
-            )
-        )
-    except KeyboardInterrupt:
-        pass
 
 
 # Miner commands
