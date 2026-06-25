@@ -78,11 +78,13 @@ def start_generator():
     from openai import AsyncOpenAI
 
     import asyncio
-    from vocence.domain.config import OPENAI_AUTH_KEY, CHUTES_AUTH_KEY, CHAIN_NETWORK, SUBTENSOR_TIMEOUT_SEC, USE_LOCAL_REGISTRY
+    from vocence.domain.config import OPENAI_AUTH_KEY, CHUTES_AUTH_KEY, CHAIN_NETWORK, USE_LOCAL_REGISTRY
     from vocence.shared.logging import emit_log, print_header
     from vocence.adapters.storage import create_validator_storage_client
     from vocence.pipeline.generation import generate_samples_continuously
     from vocence.pipeline.corpus import run_corpus_manager
+    from vocence.engine.block_clock import BlockClock, run_block_poller
+    from vocence.engine.coordinator import _reconnect_subtensor
 
     async def run_generator():
         print_header("Vocence Prompt Generator Starting")
@@ -94,21 +96,22 @@ def start_generator():
             emit_log("OPENAI_AUTH_KEY environment variable required", "error")
             return
 
-        subtensor = bt.AsyncSubtensor(network=CHAIN_NETWORK)
+        # One connection + one block poller; tasks read the shared clock.
+        subtensor_ref = {"client": bt.AsyncSubtensor(network=CHAIN_NETWORK)}
+        clock = BlockClock()
         validator_client = create_validator_storage_client()
         openai_client = AsyncOpenAI(api_key=OPENAI_AUTH_KEY)
 
-        async def get_block_with_timeout():
-            return await asyncio.wait_for(subtensor.get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC)
-
-        # Background: keep the local corpus topped up and (if enabled) the miner registry fresh.
-        bg_tasks = [asyncio.create_task(run_corpus_manager())]
+        bg_tasks = [
+            asyncio.create_task(run_block_poller(subtensor_ref, clock, _reconnect_subtensor)),
+            asyncio.create_task(run_corpus_manager()),
+        ]
         if USE_LOCAL_REGISTRY:
             from vocence.registry.local_registry import run_miner_registry
-            bg_tasks.append(asyncio.create_task(run_miner_registry()))
+            bg_tasks.append(asyncio.create_task(run_miner_registry(get_block=clock.get_async, subtensor_ref=subtensor_ref)))
         try:
             await generate_samples_continuously(
-                validator_client, openai_client, get_block_with_timeout
+                validator_client, openai_client, clock.get_async
             )
         finally:
             for t in bg_tasks:
@@ -175,27 +178,28 @@ def start_validator():
     from vocence.domain.config import CHAIN_NETWORK, COLDKEY_NAME, HOTKEY_NAME, USE_LOCAL_REGISTRY
     from vocence.shared.logging import emit_log, print_header
     from vocence.adapters.storage import create_validator_storage_client
-    from vocence.engine.coordinator import cycle_step
+    from vocence.engine.coordinator import cycle_step, _reconnect_subtensor
+    from vocence.engine.block_clock import BlockClock, run_block_poller
 
     async def run_validator():
         print_header("Vocence Validator (Weight Setter) Starting")
-        # Use ref so cycle_step can reconnect on timeout
+        # One connection + one block poller; cycle_step and the registry read the clock.
         subtensor_ref = {"client": bt.AsyncSubtensor(network=CHAIN_NETWORK)}
+        clock = BlockClock()
         wallet = bt.Wallet(name=COLDKEY_NAME, hotkey=HOTKEY_NAME)
         validator_client = create_validator_storage_client()
         emit_log(f"Wallet: {COLDKEY_NAME}/{HOTKEY_NAME}", "info")
         emit_log(f"Network: {CHAIN_NETWORK}", "info")
-        # Weight-setting reads valid miners from the local registry, so keep it fresh.
-        registry_task = None
+        bg_tasks = [asyncio.create_task(run_block_poller(subtensor_ref, clock, _reconnect_subtensor))]
         if USE_LOCAL_REGISTRY:
             from vocence.registry.local_registry import run_miner_registry
-            registry_task = asyncio.create_task(run_miner_registry())
+            bg_tasks.append(asyncio.create_task(run_miner_registry(get_block=clock.get_async, subtensor_ref=subtensor_ref)))
         try:
             while True:
-                await cycle_step(subtensor_ref, wallet, validator_client)
+                await cycle_step(subtensor_ref, wallet, validator_client, clock.get_async)
         finally:
-            if registry_task is not None:
-                registry_task.cancel()
+            for t in bg_tasks:
+                t.cancel()
 
     asyncio.run(run_validator())
 

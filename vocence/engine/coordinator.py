@@ -452,27 +452,35 @@ async def _reconnect_subtensor(subtensor_ref: dict) -> None:
     emit_log("Reconnected subtensor (new connection)", "info")
 
 
-async def cycle_step(subtensor_ref: dict, wallet: bt.Wallet, storage_client: Minio) -> None:
+async def cycle_step(subtensor_ref: dict, wallet: bt.Wallet, storage_client: Minio, get_block=None) -> None:
     """Wait for cycle boundary (within block tolerance) and run weight setting once per cycle.
-    
+
     Uses a block range [expected - CYCLE_BLOCK_TOLERANCE, expected + CYCLE_BLOCK_TOLERANCE]
-    so we don't miss the cycle if get_current_block was briefly unavailable. Executes at most
-    once per logical cycle. All subtensor calls are wrapped with SUBTENSOR_TIMEOUT_SEC so a
-    dropped connection doesn't hang forever. On timeout, creates a new AsyncSubtensor so the
-    next attempt uses a fresh connection.
+    so we don't miss the cycle if the block was briefly unavailable. Executes at most once
+    per logical cycle. metagraph/set_weights are wrapped with SUBTENSOR_TIMEOUT_SEC and
+    reconnect on timeout.
+
+    get_block: async callable returning the current block. `serve` injects the shared
+    block clock so this loop makes no extra get_current_block RPC. When omitted, falls
+    back to fetching directly from subtensor_ref (with reconnect).
     """
     global _last_executed_cycle_block
     subtensor = subtensor_ref["client"]
     try:
-        current_block = await asyncio.wait_for(subtensor.get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC)
+        if get_block is not None:
+            current_block = await get_block()
+        else:
+            current_block = await asyncio.wait_for(subtensor.get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         emit_log(f"get_current_block timed out (>{SUBTENSOR_TIMEOUT_SEC}s), reconnecting subtensor...", "error")
         await _reconnect_subtensor(subtensor_ref)
         await asyncio.sleep(12)
         return
     except Exception as e:
-        emit_log(f"get_current_block failed: {e}; reconnecting subtensor...", "error")
-        await _reconnect_subtensor(subtensor_ref)
+        # Block clock not ready yet, or direct fetch failed.
+        if get_block is None:
+            emit_log(f"get_current_block failed: {e}; reconnecting subtensor...", "error")
+            await _reconnect_subtensor(subtensor_ref)
         await asyncio.sleep(12)
         return
 
@@ -539,14 +547,26 @@ async def main() -> None:
     
     emit_log("Starting sample generation loop in background...", "start")
 
-    async def get_block_with_timeout() -> int:
-        """Wrap get_current_block with timeout; on timeout reconnect so generator gets fresh connection."""
-        try:
-            return await asyncio.wait_for(subtensor_ref["client"].get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC)
-        except (asyncio.TimeoutError, Exception):
-            emit_log("get_current_block failed in generator, reconnecting subtensor...", "warn")
-            await _reconnect_subtensor(subtensor_ref)
-            raise
+    # Single block source for the whole process: one poller updates the clock; the
+    # generator, weight-setter, and registry all read it (no extra get_current_block RPC).
+    from vocence.engine.block_clock import BlockClock, run_block_poller
+    block_clock = BlockClock()
+    get_block = block_clock.get_async
+
+    async def run_block_poller_supervised() -> None:
+        import traceback as _tb
+        backoff = 12.0
+        while True:
+            try:
+                await run_block_poller(subtensor_ref, block_clock, _reconnect_subtensor)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                emit_log(f"Block poller crashed: {e}. Restarting in {backoff:.0f}s...", "error")
+                _tb.print_exc()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300.0)
 
     async def run_generator_supervised() -> None:
         """Run generate_samples_continuously in a supervised loop.
@@ -567,7 +587,7 @@ async def main() -> None:
             start_time = time.time()
             try:
                 await generate_samples_continuously(
-                    validator_client, openai_client, get_block_with_timeout,
+                    validator_client, openai_client, get_block,
                 )
                 # generate_samples_continuously is an infinite loop — returning is unexpected.
                 emit_log(
@@ -615,7 +635,7 @@ async def main() -> None:
         backoff = 12.0
         while True:
             try:
-                await run_miner_registry()
+                await run_miner_registry(get_block=get_block, subtensor_ref=subtensor_ref)
                 return  # run_miner_registry loops forever; returning is unexpected
             except asyncio.CancelledError:
                 raise
@@ -625,6 +645,7 @@ async def main() -> None:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 300.0)
 
+    block_poller_task = asyncio.create_task(run_block_poller_supervised())
     corpus_task = asyncio.create_task(run_corpus_manager_supervised())
     generator_task = asyncio.create_task(run_generator_supervised())
     registry_task = (
@@ -642,6 +663,7 @@ async def main() -> None:
                 emit_log(f"{name} supervisor was cancelled", "warn")
         return _cb
 
+    block_poller_task.add_done_callback(handle_supervisor_exception("BlockPoller"))
     corpus_task.add_done_callback(handle_supervisor_exception("Corpus"))
     generator_task.add_done_callback(handle_supervisor_exception("Generator"))
     if registry_task is not None:
@@ -649,7 +671,7 @@ async def main() -> None:
 
     emit_log("Starting weight setting loop...", "start")
     while True:
-        await cycle_step(subtensor_ref, wallet, validator_client)
+        await cycle_step(subtensor_ref, wallet, validator_client, get_block)
 
 
 def main_sync() -> None:
