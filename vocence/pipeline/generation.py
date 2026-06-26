@@ -13,7 +13,7 @@ import json
 import os
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Awaitable, Callable
 
 import aiohttp
@@ -435,14 +435,15 @@ async def generate_samples_continuously(
             }
             
             # 2. Pick a random clip from the local corpus (per-validator, maintained by run_corpus_manager)
-            evaluation_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            audio_path = await prepare_source_audio(evaluation_id)
-            if not audio_path:
+            evaluation_id = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+            prepared = await prepare_source_audio(evaluation_id)
+            if not prepared:
                 emit_log("No corpus clip available yet (corpus still filling?), waiting", "warn")
                 await asyncio.sleep(SECONDS_PER_BLOCK)
                 continue
+            audio_path, corpus_clip_key = prepared
 
-            emit_log(f"Selected corpus clip: {os.path.basename(audio_path)} ({os.path.getsize(audio_path):,} bytes)", "info")
+            emit_log(f"Selected corpus clip: {corpus_clip_key} ({os.path.getsize(audio_path):,} bytes)", "info")
             
             # 3. Check duration min/max (validator expects 20–25s source audio); use full file as task
             duration = await get_audio_duration(audio_path)
@@ -608,10 +609,10 @@ async def generate_samples_continuously(
             from vocence.pipeline.evaluation import ELEMENT_WEIGHTS
             metadata = {
                 "evaluation_id": evaluation_id,
-                "created_at": datetime.now().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "source": {
                     "origin": "local_corpus",
-                    "key": os.path.basename(audio_path),
+                    "key": corpus_clip_key,
                     "full_duration_seconds": duration,
                 },
                 "prompt": {

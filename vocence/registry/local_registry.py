@@ -99,8 +99,13 @@ def _save_cached_blacklist(hotkeys: List[str]) -> None:
     os.replace(tmp, BLOCKLIST_CACHE_PATH)
 
 
-async def _fetch_blacklist_cached() -> List[str]:
-    """Fetch the blacklist from the owner API; on failure use the last-known cache."""
+async def _fetch_blacklist_cached() -> tuple[List[str], bool]:
+    """Fetch the blacklist from the owner API; on failure fall back to the cache.
+
+    Returns (hotkeys, authoritative). authoritative is False only when the fetch
+    failed AND there is no usable cache — in that case callers must NOT treat the
+    empty list as the real blacklist (otherwise a transient outage would clear it).
+    """
     from vocence.adapters.api import create_service_client_from_wallet
 
     try:
@@ -113,23 +118,31 @@ async def _fetch_blacklist_cached() -> List[str]:
             await client.close()
         hotkeys = [str(h) for h in (hotkeys or [])]
         _save_cached_blacklist(hotkeys)
-        return hotkeys
+        return hotkeys, True
     except Exception as e:
         cached = _load_cached_blacklist()
         emit_log(
             f"Blacklist fetch failed ({e}); using {len(cached)} cached entries", "warn"
         )
-        return cached
+        return cached, bool(cached)
 
 
 async def _sync_blacklist_to_local_db() -> None:
     """Mirror the (cached) central blacklist into the local blocked_entities table so
-    the shared validation pipeline picks it up exactly as on the owner API."""
+    the shared validation pipeline picks it up exactly as on the owner API.
+
+    On a failed fetch with no cache (non-authoritative), keep the DB's last-known
+    blacklist untouched rather than clearing it.
+    """
     from vocence.registry.persistence.repositories.blocklist_repository import (
         BlocklistRepository,
     )
 
-    target = set(await _fetch_blacklist_cached())
+    hotkeys, authoritative = await _fetch_blacklist_cached()
+    if not authoritative:
+        emit_log("Blacklist unavailable (no fresh data, no cache); keeping last-known DB", "warn")
+        return
+    target = set(hotkeys)
     repo = BlocklistRepository()
     current = set(await repo.fetch_blocked_hotkeys())
     for hk in target - current:
@@ -201,15 +214,18 @@ async def run_miner_registry(get_block=None, subtensor_ref=None) -> None:
                     try:
                         await _sync_blacklist_to_local_db()
                         await task._validate_participants(subtensor=subtensor_ref["client"], block=pin)
+                        last_boundary = boundary  # only mark done on success
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
-                        emit_log(f"Local registry pass failed ({e}); retry", "warn")
+                        # Leave last_boundary unchanged so the next tick retries this
+                        # boundary (until block advances past it / max-lag).
+                        emit_log(f"Local registry pass failed ({e}); will retry", "warn")
                 else:
                     emit_log(
                         f"Skipping stale validation boundary {boundary} (block {block})", "warn"
                     )
-                last_boundary = boundary
+                    last_boundary = boundary  # deliberate skip; advance past it
             await asyncio.sleep(SECONDS_PER_BLOCK)
     finally:
         if own_subtensor:

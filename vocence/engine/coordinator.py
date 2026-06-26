@@ -297,8 +297,10 @@ async def execute_cycle(
         bucket_configs = []
 
     # Metagraph up front: needed for active-validator detection and set_weights.
+    # Pin to the cycle block so validators entering the same cycle use the same
+    # stake/UID snapshot.
     try:
-        metagraph = await asyncio.wait_for(subtensor.metagraph(SUBNET_ID), timeout=SUBTENSOR_TIMEOUT_SEC)
+        metagraph = await asyncio.wait_for(subtensor.metagraph(SUBNET_ID, block=block), timeout=SUBTENSOR_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         emit_log(f"[{block}] Timed out fetching metagraph (>{SUBTENSOR_TIMEOUT_SEC}s), reconnecting subtensor...", "error")
         await _reconnect_subtensor(subtensor_ref)

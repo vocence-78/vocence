@@ -27,6 +27,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from vocence.shared.logging import emit_log
@@ -144,17 +145,35 @@ def _pick_random_chapter_sync(
     return None
 
 
+_ALLOWED_CHAPTER_HOSTS = ("librivox.org", "archive.org")
+
+
+def _allowed_chapter_url(url: str) -> bool:
+    """Only http(s) URLs on LibriVox/archive.org hosts — guards against SSRF if the
+    upstream API response is ever malformed/compromised (e.g. file:// or internal URLs)."""
+    try:
+        u = urlparse(url)
+    except Exception:
+        return False
+    if u.scheme not in ("http", "https"):
+        return False
+    host = (u.hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in _ALLOWED_CHAPTER_HOSTS)
+
+
 def _download_librivox_chapter_sync(listen_url: str, path: str) -> bool:
-    """Download chapter MP3 to path. Returns True on success."""
+    """Stream a chapter MP3 to disk. Returns True on success.
+
+    Streamed (not buffered) so a large LibriVox section can't spike memory / OOM.
+    """
+    if not _allowed_chapter_url(listen_url):
+        emit_log(f"Corpus: rejected non-allowlisted chapter URL: {(listen_url or '')[:60]}", "warn")
+        return False
     try:
         req = Request(listen_url, headers={"User-Agent": USER_AGENT})
-        with urlopen(req, timeout=120) as resp:
-            data = resp.read()
-        if len(data) < 1000:
-            return False
-        with open(path, "wb") as f:
-            f.write(data)
-        return True
+        with urlopen(req, timeout=120) as resp, open(path, "wb") as f:
+            shutil.copyfileobj(resp, f, length=1024 * 1024)
+        return os.path.getsize(path) >= 1000
     except Exception:
         return False
 
@@ -343,16 +362,17 @@ def select_local_audio() -> Optional[str]:
     return by_name[chosen_name]
 
 
-async def prepare_source_audio(evaluation_id: str) -> Optional[str]:
+async def prepare_source_audio(evaluation_id: str) -> Optional[Tuple[str, str]]:
     """Select a corpus clip and copy it to a per-round /tmp path for evaluation.
 
     A copy is made (not the original) so the generator's cleanup of the round file
-    never deletes a corpus clip. Returns the /tmp path, or None if no clip is
-    available.
+    never deletes a corpus clip. Returns (tmp_path, corpus_clip_basename), or None if
+    no clip is available. The corpus basename is the stable provenance id to record in
+    metadata (the /tmp copy is ephemeral).
     """
     src = select_local_audio()
     if not src:
         return None
     dest = f"/tmp/source_audio_{evaluation_id}.wav"
     await asyncio.to_thread(shutil.copyfile, src, dest)
-    return dest
+    return dest, os.path.basename(src)

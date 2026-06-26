@@ -60,7 +60,7 @@ Vocence integrates with other Bittensor infrastructure, including:
 | Role | What they do |
 |------|----------------|
 | **Miners** | Train PromptTTS models, publish them on Hugging Face, and deploy on [Chutes](https://chutes.ai) using the canonical Vocence wrapper. They expose a single `/speak` API (text + instruction → WAV). You can run miner workflows via the [CLI](docs/CLI.md#miner-commands) (`vocence miner push`, `vocence miner commit`) or follow [miner_sample](miner_sample/MINER_GUIDE.md) for the Chutes deploy. Rewards come from validator scores. |
-| **Validators** | Pull the list of registered miners, call each miner's Chutes `/speak` endpoint with evaluation prompts, run the pre-defined scoring pipeline, and set weights on chain. Sample generation remains per-validator, but weight setting now uses **global consensus scoring**: each validator reads the most recent evaluation window from every **active validator** bucket, aggregates those results with **stake-weighted** scoring, and then applies the subnet's winner-take-all + threshold rule. Run the validator via **Docker + Watchtower** (recommended; see [validator-setup.md](docs/validator-setup.md)) or the [CLI](docs/CLI.md#validator-commands) (`vocence serve`). They need Chutes access (to hit miner chutes), the owner API (miners list, active validators, dashboard), and readonly access to other active validators' Hippius sample buckets. |
+| **Validators** | Pull the list of registered miners, call each miner's Chutes `/speak` endpoint with evaluation prompts, run the pre-defined scoring pipeline, and set weights on chain. Sample generation remains per-validator, but weight setting now uses **global consensus scoring**: each validator reads the most recent evaluation window from every **active validator** bucket, aggregates those results with **stake-weighted** scoring, and then applies the subnet's winner-take-all + threshold rule. Run the validator via **Docker + Watchtower** (recommended; see [validator-setup.md](docs/validator-setup.md)) or the [CLI](docs/CLI.md#validator-commands) (`vocence serve`). They need Chutes access (to hit miner chutes), the owner API (centralized blacklist + dashboard telemetry only — miner list and active validators are computed locally), and readonly access to other active validators' Hippius sample buckets. |
 
 ---
 
@@ -87,7 +87,7 @@ Vocence integrates with other Bittensor infrastructure, including:
 **To run a validator you must contact the Vocence team.** They will:
 
 - Grant **Chutes permission** so your validator can access miners' chutes.
-- Provide the **owner API endpoint** (`API_URL`) for miner list, blocklist, and evaluation submission (dashboard integration).
+- Provide the **owner API endpoint** (`API_URL`) for the centralized blocklist and evaluation submission (dashboard integration). The miner list and active-validator set are computed locally, not fetched from the API.
 - Provide the **Hippius sub-bucket keys**
 
 Then:
@@ -123,8 +123,8 @@ Sample generation is still local to each validator: each validator downloads sou
 
 Weight setting is now **global and deterministic**:
 
-- Validators fetch the current **valid miner list** from the owner API.
-- Validators fetch the current **active validator list** from the owner API. A validator is considered active when it submitted evaluation data recently (default window: 24 hours).
+- Validators compute the current **valid miner list** themselves via a **local registry** (chain commitments + HuggingFace/Chutes validation + duplicate detection, stored in local SQLite); they no longer fetch it from the owner API.
+- Validators determine the current **active validator** set locally: a peer is active when its sample bucket has a fresh evaluation (default window: 24 hours) and it is on the metagraph with stake — no owner API call.
 - Validators load local readonly bucket credentials from `VALIDATOR_BUCKETS_JSON` in `.env`.
 - For each active validator that also exists in `VALIDATOR_BUCKETS_JSON`, validators read the most recent scoring window from that validator's bucket (default: 50 evaluations).
 - Miner win rates are aggregated across active validators using **stake-weighted scoring**, where each validator's influence is weighted by `stake ** 0.25` (fourth-root of stake, configurable via `VALIDATOR_WEIGHT_EXPONENT`) from the current metagraph.

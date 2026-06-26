@@ -93,10 +93,10 @@ def _newest_eval_age_seconds_sync(client: Any, bucket_name: str) -> Optional[flo
     if newest is None:
         return None
     try:
-        dt = datetime.strptime(newest, "%Y-%m-%d_%H-%M-%S")
+        dt = datetime.strptime(newest, "%Y-%m-%d_%H-%M-%S").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
-    return (datetime.now() - dt).total_seconds()
+    return (datetime.now(timezone.utc) - dt).total_seconds()
 
 
 async def determine_active_bucket_configs(
