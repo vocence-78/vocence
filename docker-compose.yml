@@ -33,10 +33,15 @@ services:
       - HOTKEY_NAME=${HOTKEY_NAME:-default}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_DIR=${LOG_DIR:-logs}
+      # Persistent state under /app/data (mounted below): corpus, registry DB, blacklist cache.
+      - CORPUS_LOCAL_DIR=${CORPUS_LOCAL_DIR:-/app/data/corpus}
+      - REGISTRY_DB_PATH=${REGISTRY_DB_PATH:-/app/data/registry.sqlite}
+      - BLOCKLIST_CACHE_PATH=${BLOCKLIST_CACHE_PATH:-/app/data/blocklist_cache.json}
 
     volumes:
       - ~/.bittensor/wallets:/home/validator/.bittensor/wallets:ro
       - ./logs:/app/logs
+      - ./data:/app/data
 
     deploy:
       resources:

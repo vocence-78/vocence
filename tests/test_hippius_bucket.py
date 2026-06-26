@@ -26,12 +26,12 @@ def _should_skip_hippius_test() -> bool:
 )
 def test_hippius_bucket_credentials_and_upload_list():
     """Create test bucket, upload a file, list objects; verifies credentials and code."""
-    from vocence.adapters.storage import create_storage_client
+    from vocence.adapters.storage import create_validator_storage_client
 
     bucket_name = "vocence-test-hippius"
     object_name = "test/hello.txt"
 
-    client = create_storage_client()
+    client = create_validator_storage_client()
 
     # Create bucket if it doesn't exist
     if not client.bucket_exists(bucket_name):

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import math
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from vocence.adapters.storage import create_custom_storage_client
 from vocence.domain.config import (
@@ -15,6 +14,7 @@ from vocence.domain.config import (
     MIN_VALIDATOR_APPEARANCES_FOR_ELIGIBILITY,
     OWNER_HOTKEY,
     THRESHOLD_MARGIN,
+    VALIDATOR_WEIGHT_EXPONENT,
 )
 from vocence.domain.entities import ParticipantInfo
 from vocence.ranking.calculator import calculate_scores_from_samples
@@ -74,6 +74,77 @@ def select_active_bucket_configs(
     return selected, missing
 
 
+def _newest_eval_age_seconds_sync(client: Any, bucket_name: str) -> Optional[float]:
+    """Age (seconds) of the newest evaluation in a bucket, or None if empty/unknown.
+
+    Eval prefixes are sortable timestamps; non-recursive listing reads only those.
+    """
+    try:
+        objs = list(client.list_objects(bucket_name, recursive=False))
+    except Exception:
+        return None
+    newest: Optional[str] = None
+    for o in objs:
+        prefix = (getattr(o, "object_name", "") or "").rstrip("/").split("/")[0]
+        if not prefix:
+            continue
+        if newest is None or prefix > newest:
+            newest = prefix
+    if newest is None:
+        return None
+    try:
+        dt = datetime.strptime(newest, "%Y-%m-%d_%H-%M-%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - dt).total_seconds()
+
+
+async def determine_active_bucket_configs(
+    bucket_configs: List[ValidatorBucketConfig],
+    validator_stakes: Dict[str, float],
+    freshness_seconds: float,
+    min_stake: float = 0.0,
+) -> Tuple[List[ValidatorBucketConfig], List[dict]]:
+    """Active validators (replacing /validators/active): on the metagraph with
+    stake >= min_stake AND a bucket eval fresher than freshness_seconds.
+    Returns (active_configs, log-friendly events).
+    """
+
+    async def check(cfg: ValidatorBucketConfig):
+        stake = validator_stakes.get(cfg.hotkey)
+        if stake is None:
+            return (cfg, False, "not_on_metagraph")
+        if stake < min_stake:
+            return (cfg, False, f"stake_below_floor:{stake:.2f}")
+        client = create_custom_storage_client(cfg.access_key, cfg.secret_key)
+        age = await asyncio.to_thread(_newest_eval_age_seconds_sync, client, cfg.bucket_name)
+        if age is None:
+            return (cfg, False, "no_evals")
+        if age > freshness_seconds:
+            return (cfg, False, f"stale:{age / 3600:.1f}h")
+        return (cfg, True, f"active:{age / 3600:.1f}h")
+
+    results = await asyncio.gather(*[check(c) for c in bucket_configs], return_exceptions=True)
+    active: List[ValidatorBucketConfig] = []
+    events: List[dict] = []
+    for r in results:
+        if isinstance(r, Exception):
+            events.append({"level": "warn", "message": str(r)})
+            continue
+        cfg, is_active, reason = r
+        events.append(
+            {
+                "level": "info" if is_active else "warn",
+                "hotkey": cfg.hotkey,
+                "bucket_name": cfg.bucket_name,
+                "reason": reason,
+            }
+        )
+        if is_active:
+            active.append(cfg)
+    return active, events
+
+
 async def collect_validator_bucket_scores(
     bucket_configs: List[ValidatorBucketConfig],
     valid_hotkeys: set[str],
@@ -126,7 +197,7 @@ def aggregate_global_scores(
     """Aggregate per-validator miner win rates into one global weighted score."""
     aggregated: Dict[str, Dict[str, Any]] = {}
     base_weights = {
-        hotkey: math.sqrt(max(0.0, validator_stakes.get(hotkey, 0.0)))
+        hotkey: max(0.0, validator_stakes.get(hotkey, 0.0)) ** VALIDATOR_WEIGHT_EXPONENT
         for hotkey in bucket_scores.keys()
     }
     has_positive_weight = any(weight > 0 for weight in base_weights.values())
@@ -397,7 +468,7 @@ def build_global_scoring_snapshot(
                 "bucket_name": cfg.bucket_name,
                 "label": short_bucket_label(cfg.bucket_name),
                 "stake": stake,
-                "weight": math.sqrt(max(0.0, stake)),
+                "weight": max(0.0, stake) ** VALIDATOR_WEIGHT_EXPONENT,
             }
         )
 

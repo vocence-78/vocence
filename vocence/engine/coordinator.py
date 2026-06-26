@@ -35,7 +35,7 @@ from vocence.domain.config import (
     COLDKEY_NAME,
     HOTKEY_NAME,
     CHAIN_NETWORK,
-    AUDIO_SOURCE_BUCKET,
+    CORPUS_LOCAL_DIR,
     AUDIO_SAMPLES_BUCKET,
     VALIDATOR_ID,
     SAMPLE_SLOT_INTERVAL_BLOCKS,
@@ -44,11 +44,13 @@ from vocence.domain.config import (
     MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING,
     MIN_VALIDATOR_APPEARANCES_FOR_ELIGIBILITY,
     MIN_EVALS_PER_VALIDATOR_FOR_GLOBAL_SCORE,
+    USE_LOCAL_REGISTRY,
+    ACTIVE_VALIDATOR_WINDOW_HOURS,
+    ACTIVE_VALIDATOR_MIN_STAKE,
 )
 from vocence.shared.logging import emit_log, print_header, print_table
 from vocence.domain.entities import ParticipantInfo
 from vocence.adapters.storage import (
-    create_corpus_storage_client,
     create_validator_storage_client,
 )
 from vocence.ranking.global_scoring import (
@@ -56,9 +58,10 @@ from vocence.ranking.global_scoring import (
     build_global_scoring_snapshot,
     choose_winner,
     collect_validator_bucket_scores,
-    select_active_bucket_configs,
+    determine_active_bucket_configs,
     validator_stakes_from_metagraph,
 )
+from vocence.registry.local_registry import fetch_local_valid_participants
 from vocence.pipeline.generation import generate_samples_continuously
 from vocence.validator_buckets import ValidatorBucketConfig, load_validator_bucket_configs
 
@@ -67,47 +70,32 @@ from vocence.validator_buckets import ValidatorBucketConfig, load_validator_buck
 _last_executed_cycle_block: int | None = None
 
 
-async def fetch_participants_from_api() -> List[ParticipantInfo]:
-    """Get valid participants from the centralized API.
-    
-    Returns:
-        List of valid ParticipantInfo objects
+async def fetch_valid_participants() -> List[ParticipantInfo]:
+    """Get valid participants.
+
+    Default: the validator's own local registry (no API dependency). If
+    USE_LOCAL_REGISTRY is disabled, fall back to the centralized API.
     """
+    if USE_LOCAL_REGISTRY:
+        try:
+            return await fetch_local_valid_participants()
+        except Exception as e:
+            emit_log(f"Failed to read local registry: {e}", "warn")
+            return []
     try:
         from vocence.adapters.api import create_service_client_from_wallet
-        
+
         client = create_service_client_from_wallet(
             wallet_name=COLDKEY_NAME,
             hotkey_name=HOTKEY_NAME,
             api_url=API_URL,
         )
-        
         try:
-            miners = await client.get_valid_miners()
-            return miners
+            return await client.get_valid_miners()
         finally:
             await client.close()
     except Exception as e:
         emit_log(f"Failed to get miners from API: {e}", "warn")
-        return []
-
-
-async def fetch_active_validators_from_api() -> List[str]:
-    """Get active validator hotkeys from the centralized API."""
-    try:
-        from vocence.adapters.api import create_service_client_from_wallet
-
-        client = create_service_client_from_wallet(
-            wallet_name=COLDKEY_NAME,
-            hotkey_name=HOTKEY_NAME,
-            api_url=API_URL,
-        )
-        try:
-            return await client.get_active_validators()
-        finally:
-            await client.close()
-    except Exception as e:
-        emit_log(f"Failed to get active validators from API: {e}", "warn")
         return []
 
 
@@ -280,23 +268,12 @@ async def execute_cycle(
     subtensor = subtensor_ref["client"]
     _ = storage_client  # generation still uses the local validator bucket; scoring now reads all active validator buckets
 
-    emit_log(f"[{block}] Fetching participants and active validators from API", "info")
+    emit_log(f"[{block}] Gathering inputs (local registry + metagraph + validator buckets)", "info")
     await _send_weight_setting_graph_event(block, phase="fetching_inputs")
 
-    try:
-        participant_infos = await fetch_participants_from_api()
-    except Exception as e:
-        emit_log(f"[{block}] Failed to get participants from API: {e}", "error")
-        return
-
+    participant_infos = await fetch_valid_participants()
     if not participant_infos:
         emit_log(f"[{block}] No participant commitments found", "warn")
-        return
-
-    try:
-        active_validator_hotkeys = await fetch_active_validators_from_api()
-    except Exception as e:
-        emit_log(f"[{block}] Failed to get active validators from API: {e}", "error")
         return
 
     valid_participants = [p for p in participant_infos if p.is_valid]
@@ -319,23 +296,35 @@ async def execute_cycle(
         emit_log(f"[{block}] Failed to load validator bucket config: {e}", "error")
         bucket_configs = []
 
-    if len(active_validator_hotkeys) < MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING:
-        emit_log(
-            f"[{block}] Only {len(active_validator_hotkeys)} active validators from API; need at least {MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING}. Burning this cycle.",
-            "warn",
-        )
-        selected_bucket_configs: list[ValidatorBucketConfig] = []
-    else:
-        selected_bucket_configs, missing_hotkeys = select_active_bucket_configs(bucket_configs, active_validator_hotkeys)
-        if missing_hotkeys:
-            emit_log(
-                f"Active validator hotkeys missing from local bucket config: {len(missing_hotkeys)} ({', '.join(hk[:8] for hk in missing_hotkeys[:5])})",
-                "warn",
-            )
+    # Metagraph up front: needed for active-validator detection and set_weights.
+    # Pin to the cycle block so validators entering the same cycle use the same
+    # stake/UID snapshot.
+    try:
+        metagraph = await asyncio.wait_for(subtensor.metagraph(SUBNET_ID, block=block), timeout=SUBTENSOR_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        emit_log(f"[{block}] Timed out fetching metagraph (>{SUBTENSOR_TIMEOUT_SEC}s), reconnecting subtensor...", "error")
+        await _reconnect_subtensor(subtensor_ref)
+        return
+    except Exception as e:
+        emit_log(f"[{block}] Failed to fetch metagraph: {e}", "error")
+        return
+
+    validator_stakes = validator_stakes_from_metagraph(metagraph)
+
+    # Active validators: bucket freshness + metagraph stake (replaces /validators/active).
+    freshness_seconds = ACTIVE_VALIDATOR_WINDOW_HOURS * 3600
+    selected_bucket_configs, active_events = await determine_active_bucket_configs(
+        bucket_configs, validator_stakes, freshness_seconds, ACTIVE_VALIDATOR_MIN_STAKE
+    )
+    for ev in active_events:
+        if ev.get("level") == "info":
+            emit_log(f"Active validator {str(ev.get('hotkey',''))[:8]}... ({ev.get('bucket_name')}): {ev.get('reason')}", "info")
+        else:
+            emit_log(f"Inactive/skipped validator {str(ev.get('hotkey',''))[:8]}... ({ev.get('bucket_name', '')}): {ev.get('reason') or ev.get('message')}", "warn")
 
     if len(selected_bucket_configs) < MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING:
         emit_log(
-            f"[{block}] Only {len(selected_bucket_configs)} active validators have local bucket credentials; need at least {MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING}. Burning this cycle.",
+            f"[{block}] Only {len(selected_bucket_configs)} active validator buckets (fresh + on metagraph); need at least {MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING}. Burning this cycle.",
             "warn",
         )
         bucket_scores: Dict[str, Dict[str, Dict[str, Any]]] = {}
@@ -365,17 +354,6 @@ async def execute_cycle(
                     "info",
                 )
 
-    try:
-        metagraph = await asyncio.wait_for(subtensor.metagraph(SUBNET_ID), timeout=SUBTENSOR_TIMEOUT_SEC)
-    except asyncio.TimeoutError:
-        emit_log(f"[{block}] Timed out fetching metagraph (>{SUBTENSOR_TIMEOUT_SEC}s), reconnecting subtensor...", "error")
-        await _reconnect_subtensor(subtensor_ref)
-        return
-    except Exception as e:
-        emit_log(f"[{block}] Failed to fetch metagraph: {e}", "error")
-        return
-
-    validator_stakes = validator_stakes_from_metagraph(metagraph)
     scores = aggregate_global_scores(bucket_scores, validator_stakes)
     if not scores:
         emit_log(f"[{block}] No usable global evaluation data found across active validator buckets", "warn")
@@ -476,27 +454,35 @@ async def _reconnect_subtensor(subtensor_ref: dict) -> None:
     emit_log("Reconnected subtensor (new connection)", "info")
 
 
-async def cycle_step(subtensor_ref: dict, wallet: bt.Wallet, storage_client: Minio) -> None:
+async def cycle_step(subtensor_ref: dict, wallet: bt.Wallet, storage_client: Minio, get_block=None) -> None:
     """Wait for cycle boundary (within block tolerance) and run weight setting once per cycle.
-    
+
     Uses a block range [expected - CYCLE_BLOCK_TOLERANCE, expected + CYCLE_BLOCK_TOLERANCE]
-    so we don't miss the cycle if get_current_block was briefly unavailable. Executes at most
-    once per logical cycle. All subtensor calls are wrapped with SUBTENSOR_TIMEOUT_SEC so a
-    dropped connection doesn't hang forever. On timeout, creates a new AsyncSubtensor so the
-    next attempt uses a fresh connection.
+    so we don't miss the cycle if the block was briefly unavailable. Executes at most once
+    per logical cycle. metagraph/set_weights are wrapped with SUBTENSOR_TIMEOUT_SEC and
+    reconnect on timeout.
+
+    get_block: async callable returning the current block. `serve` injects the shared
+    block clock so this loop makes no extra get_current_block RPC. When omitted, falls
+    back to fetching directly from subtensor_ref (with reconnect).
     """
     global _last_executed_cycle_block
     subtensor = subtensor_ref["client"]
     try:
-        current_block = await asyncio.wait_for(subtensor.get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC)
+        if get_block is not None:
+            current_block = await get_block()
+        else:
+            current_block = await asyncio.wait_for(subtensor.get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         emit_log(f"get_current_block timed out (>{SUBTENSOR_TIMEOUT_SEC}s), reconnecting subtensor...", "error")
         await _reconnect_subtensor(subtensor_ref)
         await asyncio.sleep(12)
         return
     except Exception as e:
-        emit_log(f"get_current_block failed: {e}; reconnecting subtensor...", "error")
-        await _reconnect_subtensor(subtensor_ref)
+        # Block clock not ready yet, or direct fetch failed.
+        if get_block is None:
+            emit_log(f"get_current_block failed: {e}; reconnecting subtensor...", "error")
+            await _reconnect_subtensor(subtensor_ref)
         await asyncio.sleep(12)
         return
 
@@ -538,14 +524,13 @@ async def main() -> None:
         emit_log("OPENAI_AUTH_KEY environment variable required", "error")
         return
 
-    emit_log(f"Using centralized API for miners: {API_URL}", "info")
-    emit_log(f"Using corpus bucket (read) and own samples bucket for scoring: {AUDIO_SAMPLES_BUCKET}", "info")
+    emit_log(f"Valid miners source: {'local registry' if USE_LOCAL_REGISTRY else f'API {API_URL}'}", "info")
+    emit_log(f"Active validators: bucket freshness (<{ACTIVE_VALIDATOR_WINDOW_HOURS}h) + metagraph stake", "info")
 
     # Use a ref so we can replace the subtensor on timeout (reconnect).
     emit_log("Initializing clients...", "info")
     subtensor_ref: dict = {"client": bt.AsyncSubtensor(network=CHAIN_NETWORK)}
     wallet = bt.Wallet(name=COLDKEY_NAME, hotkey=HOTKEY_NAME)
-    corpus_client = create_corpus_storage_client()
     validator_client = create_validator_storage_client()
     openai_client = AsyncOpenAI(api_key=OPENAI_AUTH_KEY)
     
@@ -555,7 +540,7 @@ async def main() -> None:
     emit_log(f"Subnet ID: {SUBNET_ID}", "info")
     emit_log(f"Cycle length: {CYCLE_LENGTH} blocks, offset {CYCLE_OFFSET_BLOCKS} (~{CYCLE_LENGTH * 12}s)", "info")
     emit_log(f"Sample slots: every {SAMPLE_SLOT_INTERVAL_BLOCKS} blocks at offset {SAMPLE_SLOT_OFFSET_BLOCKS} (validator_id={VALIDATOR_ID})", "info")
-    emit_log(f"Corpus bucket (read): s3://{AUDIO_SOURCE_BUCKET}", "info")
+    emit_log(f"Corpus (local): {CORPUS_LOCAL_DIR}", "info")
     emit_log(f"Samples bucket (own): s3://{AUDIO_SAMPLES_BUCKET}", "info")
     emit_log(f"Min evals to compete: {MIN_EVALS_TO_COMPETE}", "info")
     emit_log(f"Threshold margin: {THRESHOLD_MARGIN}", "info")
@@ -564,14 +549,26 @@ async def main() -> None:
     
     emit_log("Starting sample generation loop in background...", "start")
 
-    async def get_block_with_timeout() -> int:
-        """Wrap get_current_block with timeout; on timeout reconnect so generator gets fresh connection."""
-        try:
-            return await asyncio.wait_for(subtensor_ref["client"].get_current_block(), timeout=SUBTENSOR_TIMEOUT_SEC)
-        except (asyncio.TimeoutError, Exception):
-            emit_log("get_current_block failed in generator, reconnecting subtensor...", "warn")
-            await _reconnect_subtensor(subtensor_ref)
-            raise
+    # Single block source for the whole process: one poller updates the clock; the
+    # generator, weight-setter, and registry all read it (no extra get_current_block RPC).
+    from vocence.engine.block_clock import BlockClock, run_block_poller
+    block_clock = BlockClock()
+    get_block = block_clock.get_async
+
+    async def run_block_poller_supervised() -> None:
+        import traceback as _tb
+        backoff = 12.0
+        while True:
+            try:
+                await run_block_poller(subtensor_ref, block_clock, _reconnect_subtensor)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                emit_log(f"Block poller crashed: {e}. Restarting in {backoff:.0f}s...", "error")
+                _tb.print_exc()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300.0)
 
     async def run_generator_supervised() -> None:
         """Run generate_samples_continuously in a supervised loop.
@@ -592,7 +589,7 @@ async def main() -> None:
             start_time = time.time()
             try:
                 await generate_samples_continuously(
-                    corpus_client, validator_client, openai_client, get_block_with_timeout,
+                    validator_client, openai_client, get_block,
                 )
                 # generate_samples_continuously is an infinite loop — returning is unexpected.
                 emit_log(
@@ -616,22 +613,67 @@ async def main() -> None:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, backoff_max)
 
+    async def run_corpus_manager_supervised() -> None:
+        """Keep the local audio corpus topped up, restarting on crash with backoff."""
+        from vocence.pipeline.corpus import run_corpus_manager
+        import traceback as _tb
+        backoff = 12.0
+        while True:
+            try:
+                await run_corpus_manager()
+                return  # run_corpus_manager loops forever; returning is unexpected
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                emit_log(f"Corpus manager crashed: {e}. Restarting in {backoff:.0f}s...", "error")
+                _tb.print_exc()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300.0)
+
+    async def run_registry_supervised() -> None:
+        """Keep the local miner registry validating, restarting on crash with backoff."""
+        from vocence.registry.local_registry import run_miner_registry
+        import traceback as _tb
+        backoff = 12.0
+        while True:
+            try:
+                await run_miner_registry(get_block=get_block, subtensor_ref=subtensor_ref)
+                return  # run_miner_registry loops forever; returning is unexpected
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                emit_log(f"Miner registry crashed: {e}. Restarting in {backoff:.0f}s...", "error")
+                _tb.print_exc()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300.0)
+
+    block_poller_task = asyncio.create_task(run_block_poller_supervised())
+    corpus_task = asyncio.create_task(run_corpus_manager_supervised())
     generator_task = asyncio.create_task(run_generator_supervised())
+    registry_task = (
+        asyncio.create_task(run_registry_supervised()) if USE_LOCAL_REGISTRY else None
+    )
 
-    def handle_generator_exception(task: asyncio.Task) -> None:
-        """Surface unexpected exits from the supervisor itself (it should run forever)."""
-        try:
-            exc = task.exception()
-            if exc is not None:
-                emit_log(f"Generator supervisor exited with exception: {exc}", "error")
-        except asyncio.CancelledError:
-            emit_log("Generator supervisor was cancelled", "warn")
+    def handle_supervisor_exception(name: str):
+        def _cb(task: asyncio.Task) -> None:
+            """Surface unexpected exits from a supervisor (they should run forever)."""
+            try:
+                exc = task.exception()
+                if exc is not None:
+                    emit_log(f"{name} supervisor exited with exception: {exc}", "error")
+            except asyncio.CancelledError:
+                emit_log(f"{name} supervisor was cancelled", "warn")
+        return _cb
 
-    generator_task.add_done_callback(handle_generator_exception)
+    block_poller_task.add_done_callback(handle_supervisor_exception("BlockPoller"))
+    corpus_task.add_done_callback(handle_supervisor_exception("Corpus"))
+    generator_task.add_done_callback(handle_supervisor_exception("Generator"))
+    if registry_task is not None:
+        registry_task.add_done_callback(handle_supervisor_exception("Registry"))
 
     emit_log("Starting weight setting loop...", "start")
     while True:
-        await cycle_step(subtensor_ref, wallet, validator_client)
+        await cycle_step(subtensor_ref, wallet, validator_client, get_block)
 
 
 def main_sync() -> None:

@@ -6,8 +6,9 @@ This guide covers running a Vocence validator using **Docker** and **Watchtower*
 
 ## Prerequisites
 
-- **From the Vocence team:** Chutes permission, owner API URL (`API_URL`), Hippius corpus + validator keys, and readonly validator-bucket credentials for the active validator set.
-- **Your side:** Bittensor wallet (coldkey + hotkey), Docker and Docker Compose installed.
+- **From the Vocence team:** Chutes permission, owner API URL (`API_URL`, used only for the dashboard + centralized blacklist — not for scoring), Hippius validator bucket keys (for your own samples), and readonly validator-bucket credentials for the active validator set. (No corpus-bucket keys needed — source audio is built locally.)
+- **HuggingFace token (`HF_AUTH_TOKEN`) — optional:** validators validate miner model repos themselves (download + fingerprint), but miner repos are public so anonymous access works. Set a token only if you want HuggingFace's higher (authenticated) rate limit; each model revision is downloaded once and cached, so anonymous is usually fine.
+- **Your side:** Bittensor wallet (coldkey + hotkey), Docker and Docker Compose installed, ~12 GB free disk for `./data`.
 
 ---
 
@@ -99,16 +100,13 @@ Use `docker compose` (with a space) as in this guide; it’s the Compose V2 plug
    - Validators use this env var together with the owner API's active-validator list to decide which buckets to score from each cycle.
    - These credentials are sensitive and should stay only in `.env` or your secret manager.
 
-4. **Bittensor wallets** must be available at `~/.bittensor/wallets` on the host (coldkey and hotkey). The compose file mounts this directory into the container at `/home/validator/.bittensor/wallets` (read-only) so the app finds `~/.bittensor/wallets` when running as the validator user. If the wallet lives under **root’s home** (e.g. `/root/.bittensor/wallets`), the container user (uid 1000) must be able to read it—on the host run: `sudo chown -R 1000:1000 /root/.bittensor/wallets`.
+> **Permissions are handled automatically.** The container starts as root only long enough to make its state dirs (`./data`, `./logs`) writable, then drops to an unprivileged `validator` user. You do **not** need to `chown` anything for `./data`/`./logs` — just `docker compose up -d`. (The one exception is the **wallet** mount, which is read-only, so the container can't fix its permissions — see step 4.)
 
-5. **Create the logs directory** so the container can write daily log files. The validator runs as user `validator` (uid 1000); if `./logs` is created by Docker on first run, it is owned by root and the container cannot write. Do this once before the first `docker compose up -d`:
+4. **Bittensor wallets** must be available at `~/.bittensor/wallets` on the host (coldkey and hotkey). The compose file mounts this directory into the container at `/home/validator/.bittensor/wallets` (read-only). Because it's read-only, the container can't adjust its permissions: if the wallet lives under **root’s home** (e.g. `/root/.bittensor/wallets`), make it readable by uid 1000 on the host — `sudo chown -R 1000:1000 /root/.bittensor/wallets`.
 
-   ```bash
-   mkdir -p logs
-   sudo chown 1000:1000 logs
-   ```
+5. **Disk.** `./data` (created automatically) holds the local audio corpus, the miner-registry SQLite DB, and the cached blacklist. The corpus holds up to `AUDIO_CORPUS_MAX_ENTRIES` clips (default 10,000) at ~1.1 MB each, so budget roughly **~12 GB** of free disk; the DB and blacklist cache are tiny. Lower `AUDIO_CORPUS_MAX_ENTRIES` if disk is tight. Logs are written to `./logs/vocence_YYYY-MM-DD.log`.
 
-   If you already started the stack and `logs/` is empty, run the same two commands and then `docker compose restart validator`.
+   **Warm-up (fresh validator only):** the corpus fills in the background (~10 clips/minute, a few hours to the cap) and the registry runs its first validation pass on boot. Until both are populated the generator waits between sample slots and the first weight cycle may burn — this is expected, and only happens once. The `./data` mount persists everything across restarts/updates, so a restart needs **no** warm-up.
 
 ---
 
@@ -125,18 +123,17 @@ docker compose up -d
 
 ### How scoring works now
 
-The validator still generates its own samples locally, but final weight setting is based on **global consensus scoring**:
+The validator runs everything itself — it no longer depends on the subnet API for scoring inputs:
 
-- The owner API returns the current valid miner list.
-- The owner API returns the current active validator list.
-- Your validator intersects that active-validator list with `VALIDATOR_BUCKETS_JSON`.
-- For each matching validator bucket, it reads the recent scoring window (default 50 evaluations).
-- It computes a global miner win rate using stake-weighted aggregation (`sqrt(stake)`).
+- **Valid miners** come from the validator's **local registry**: a background task validates miners from chain commitments (HuggingFace repo audit + Chutes checks + duplicate detection — the same logic the subnet API runs) every hour into a local SQLite DB. The centralized **blacklist** is still fetched from the API and cached locally (blacklisted miners are excluded).
+- **Active validators** are determined locally at weight-set time: a peer validator counts as active if its bucket has a fresh evaluation (within `ACTIVE_VALIDATOR_WINDOW_HOURS`, default 24h) and it is on the metagraph with stake ≥ `ACTIVE_VALIDATOR_MIN_STAKE`. No API call.
+- Your validator reads the recent scoring window (default 50 evaluations) from each active validator bucket in `VALIDATOR_BUCKETS_JSON`.
+- It computes a global miner win rate using stake-weighted aggregation (`stake ** 0.25`, fourth-root; configurable via `VALIDATOR_WEIGHT_EXPONENT`).
 - A miner must have more than 40 evaluations in at least 3 active validator buckets to be globally eligible.
 - The winner must still beat earlier eligible miners and the owner base model by the configured threshold margin.
 - If active validator coverage is too low or no miner satisfies the rules, the validator burns for that cycle.
 
-This design reduces single-validator drift and helps honest validators converge on the same weights.
+This makes each validator self-sufficient (the subnet API is dashboard-only) while keeping the deterministic scoring that helps honest validators converge on the same weights. To temporarily fall back to the API for the valid-miner list, set `USE_LOCAL_REGISTRY=false`.
 
 For the full scoring rules and winner-selection details, see [scoring.md](scoring.md).
 
@@ -157,7 +154,7 @@ Then run `docker compose up -d` as above.
 - **Stream logs (stdout):**  
   `docker compose logs -f validator` (use the service name `validator`, not the container name `vocence-validator`)
 - **Daily log files:**  
-  Logs are written **in real time** into **`logs/vocence_YYYY-MM-DD.log`** (UTC date). Ensure you created `logs` and set ownership (step 4 in section 1) before first run. If `logs/` stays empty: `sudo chown 1000:1000 logs` then `docker compose restart validator`.
+  Logs are written **in real time** into **`logs/vocence_YYYY-MM-DD.log`** (UTC date). The container creates and permissions `./logs` automatically on start.
 - **Watchtower logs:**  
   `docker compose logs -f watchtower`
 - **Restart validator only:**  
@@ -187,6 +184,7 @@ The validator service has a healthcheck; Docker will report its status in `docke
 | Logs (stream) | `docker compose logs -f validator` |
 | Logs (daily files) | `logs/vocence_YYYY-MM-DD.log` in the project directory. |
 | Config | `.env` (including `VALIDATOR_BUCKETS_JSON`) and `~/.bittensor/wallets` on the host. |
+| Local state | `./data` (corpus + registry DB + blacklist cache) — auto-created; ~12 GB disk; fills over a few hours on a fresh validator. |
 
 For the full CI/CD flow (how the image is built and published), see [cicd-pipeline.md](cicd-pipeline.md). For CLI options (e.g. split generator vs weight setter if you run without Docker), see [CLI.md](CLI.md).
 
@@ -199,3 +197,9 @@ For the full CI/CD flow (how the image is built and published), see [cicd-pipeli
 
 - **"Keyfile at: .../owner_hotkey does not exist" (wallet in /root/.bittensor/wallets)**  
   The wallet is mounted correctly, but the container runs as user `validator` (uid 1000). If the wallet on the host is under root’s home and owned by root, the container cannot read it (and may report “does not exist”). On the host run: `sudo chown -R 1000:1000 /root/.bittensor/wallets`, then `docker compose restart validator`.
+
+- **Corpus never fills / logs show "Corpus round failed ... Permission denied"**  
+  The container's entrypoint normally fixes `./data` ownership automatically. If you still see this (e.g. a hardened host that blocks the entrypoint's chown), run on the host: `sudo chown -R 1000:1000 data logs`, then `docker compose restart validator`.
+
+- **Generator keeps logging "No corpus clip available yet (corpus still filling?)"**  
+  Normal on a fresh validator — the local corpus is still downloading. It resolves once enough clips exist. If it persists for many hours, check disk space for `data/corpus` and the permission note above.

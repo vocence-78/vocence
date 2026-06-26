@@ -5,9 +5,9 @@
 The Vocence CLI (`vocence`) is the single entry point for:
 
 - **Validators:** run the full validator (`serve`) or split services.
-- **Owners:** run the HTTP API and/or the corpus source audio downloader.
+- **Owners:** run the HTTP API (dashboard/metrics).
 - **Miners:** deploy models to Chutes and commit to the chain.
-- **Queries:** list miners, inspect corpus commands.
+- **Queries:** list miners.
 
 Entry point: `vocence` (from `pyproject.toml`: `vocence = "vocence.gateway.cli.main:cli"`). Run with `uv run vocence` or after `pip install -e .`.
 
@@ -55,7 +55,7 @@ vocence api
 
 **Env:** `SERVICE_HOST` (default `0.0.0.0`), `SERVICE_PORT` (default `8000`), DB and API config as per app.
 
-**Typical use:** Run API alone (e.g. for debugging), or start API in one terminal and use `vocence owner serve --no-api` in another for the downloader.
+**Typical use:** Run the dashboard/metrics API. It is not required for validators to function — validators run independently of it.
 
 ---
 
@@ -69,7 +69,7 @@ vocence api
 vocence services generator
 ```
 
-**Requires:** Same as sample-generation side of `serve` (corpus + validator storage, API, Chutes, OpenAI).
+**Requires:** Same as sample-generation side of `serve` (local corpus + validator storage, API, Chutes, OpenAI). Starts its own local corpus manager in the background.
 
 ---
 
@@ -87,66 +87,31 @@ vocence services validator
 
 ---
 
-## Owner commands
+### `vocence services corpus`
 
-Owner = operator of the **corpus bucket** (Hippius). Use owner credentials: `HIPPIUS_OWNER_*` or `HIPPIUS_ACCESS_KEY` (and bucket/endpoint).
-
-### `vocence owner serve`
-
-**Purpose:** Run all owner-side processes. By default starts **two separate OS processes**: API + source audio downloader.
-
-**Process 1:** HTTP API (same as `vocence api`) on `SERVICE_PORT` (default 8000).  
-**Process 2:** Source audio downloader in the current process (LibriVox → clips → upload to corpus bucket, prune when over `AUDIO_CORPUS_MAX_ENTRIES`).
-
-On Ctrl+C (or when the downloader exits with `--rounds`), the API process is terminated.
+**Purpose:** Run only the local audio corpus manager. Continuously downloads English LibriVox clips (20-25s) into `CORPUS_LOCAL_DIR` and prunes the oldest clips beyond `AUDIO_CORPUS_MAX_ENTRIES`. Use this when generation and corpus upkeep are split across processes; `serve` and `services generator` already run it in the background.
 
 **Usage:**
 
 ```bash
-# API + downloader (two processes)
-vocence owner serve
-
-# Only downloader (one process; API runs elsewhere)
-vocence owner serve --no-api
-
-# Limit downloader to N rounds
-vocence owner serve --rounds 10
-
-# Delay before first downloader round (seconds)
-vocence owner serve --delay 5
+vocence services corpus
 ```
 
-**Options:**
-
-| Option    | Default | Description |
-|-----------|--------|-------------|
-| `--rounds` | None (run until Ctrl+C) | Run downloader for N rounds then exit (API is then stopped). |
-| `--delay`  | 2.0    | Initial delay in seconds before first downloader round. |
-| `--no-api` | false | Run only the source audio downloader; do not start the API process. |
-
-**Requires:** Owner Hippius credentials, DB/config for API if not `--no-api`. Downloader uses `AUDIO_CORPUS_MAX_ENTRIES`, `AUDIO_CORPUS_MANIFEST_PATH`, `SOURCE_AUDIO_DOWNLOAD_INTERVAL`, LibriVox clip settings.
+**Requires:** Disk for `CORPUS_LOCAL_DIR` and `ffmpeg`. No Hippius/corpus-bucket credentials — the corpus is per-validator and local.
 
 ---
 
-### `vocence corpus source-downloader`
+### `vocence services registry`
 
-**Purpose:** Run only the LibriVox source audio downloader (same logic as the downloader in `owner serve`). Single process.
+**Purpose:** Run only the local miner registry. Validates miners from on-chain commitments (HuggingFace + Chutes + duplicate detection) on block-aligned boundaries and writes the valid set to the local SQLite DB (`REGISTRY_DB_PATH`); also mirrors the centralized blacklist (cached). Use this when splitting services; `serve`, `services generator`, and `services validator` already run it in the background.
 
 **Usage:**
 
 ```bash
-vocence corpus source-downloader
-vocence corpus source-downloader --rounds 5 --delay 2.0
+vocence services registry
 ```
 
-**Options:**
-
-| Option    | Default | Description |
-|-----------|--------|-------------|
-| `--rounds` | None | Run N rounds then exit. |
-| `--delay`  | 2.0  | Initial delay in seconds before first round. |
-
-**Requires:** Owner Hippius credentials, same config as the downloader in `owner serve`.
+**Requires:** Chain RPC, `CHUTES_API_KEY` (chute liveness), disk for `REGISTRY_DB_PATH`. `HF_AUTH_TOKEN` optional.
 
 ---
 
@@ -224,11 +189,11 @@ vocence miner commit --model-name user/model --model-revision abc123 --chute-id 
 | Command | Role / use |
 |---------|------------|
 | `vocence serve` | Validator: full run (generator + weight setter). |
-| `vocence api` | HTTP API only (single process). |
-| `vocence owner serve` | Owner: API + source downloader (two processes); use `--no-api` for downloader only. |
-| `vocence corpus source-downloader` | Owner: LibriVox downloader only. |
-| `vocence services generator` | Validator: sample generation only. |
+| `vocence api` | HTTP API only (dashboard/metrics; single process). |
+| `vocence services generator` | Validator: sample generation only (runs local corpus manager too). |
 | `vocence services validator` | Validator: weight setting only. |
+| `vocence services corpus` | Validator: local audio corpus manager only. |
+| `vocence services registry` | Validator: local miner registry (validation) only. |
 | `vocence get-miners` | Query: list miners from chain. |
 | `vocence miner push` | Miner: deploy model to Chutes. |
 | `vocence miner commit` | Miner: commit model + Chute ID to chain. |
@@ -240,6 +205,6 @@ vocence miner commit --model-name user/model --model-revision abc123 --chute-id 
 1. **After adding a new command or group:** add a section under the right role (Validator / Owner / Query / Miner) and add a row to the Command summary table.
 2. **After adding or changing options:** update the options table and any usage examples for that command.
 3. **After renaming or removing a command:** remove or rename the section and update the summary table.
-4. **Verify:** run `vocence --help`, `vocence owner --help`, `vocence owner serve --help`, etc., and confirm the doc matches the help output.
+4. **Verify:** run `vocence --help`, `vocence services --help`, `vocence services corpus --help`, etc., and confirm the doc matches the help output.
 
 Source of truth for options and help text remains `vocence/gateway/cli/main.py`; this document is the human-readable reference and should stay in sync with it.

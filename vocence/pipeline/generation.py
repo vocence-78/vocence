@@ -11,10 +11,9 @@ Continuously generates samples by:
 
 import json
 import os
-import random
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Awaitable, Callable
 
 import aiohttp
@@ -23,15 +22,13 @@ from openai import AsyncOpenAI
 
 from vocence.domain.config import (
     API_URL,
+    USE_LOCAL_REGISTRY,
     CHUTES_AUTH_KEY,
-    AUDIO_SOURCE_BUCKET,
     AUDIO_SAMPLES_BUCKET,
     CLIP_LENGTH_SECONDS,
     AUDIO_SOURCE_MIN_DURATION_SEC,
     AUDIO_SOURCE_MAX_DURATION_SEC,
     GPT_AUDIO_MODEL,
-    USED_AUDIO_FILES,
-    MAX_AUDIO_HISTORY,
     MAX_PARALLEL_MINERS,
     MAX_PARALLEL_EVALS,
     QUERY_TIMEOUT,
@@ -54,6 +51,7 @@ from vocence.pipeline.evaluation import (
     score_miner_against_spec_async,
 )
 from vocence.adapters.chutes import fetch_chute_details, construct_chute_endpoint
+from vocence.pipeline.corpus import prepare_source_audio
 from vocence.domain.entities import ParticipantInfo
 
 # ~1 block every 12s on typical chains; used when waiting for next block
@@ -168,52 +166,6 @@ async def submit_sample_metadata(
         True if saved successfully, False otherwise
     """
     return await submit_sample_to_api(sample_id, metadata, participant_results)
-
-
-async def select_random_audio(corpus_client: Minio) -> str | None:
-    """Pick a random audio file from the corpus bucket, avoiding recently used ones.
-    
-    Uses corpus credentials (owner-provided sub_key); validator must set HIPPIUS_CORPUS_*.
-    
-    Args:
-        corpus_client: Minio client for the corpus bucket (create_corpus_storage_client)
-        
-    Returns:
-        Object name of the selected audio, or None if no suitable audio found
-    """
-    global USED_AUDIO_FILES
-    
-    # List all audio files in corpus bucket
-    objects = await asyncio.to_thread(
-        lambda: list(corpus_client.list_objects(AUDIO_SOURCE_BUCKET, recursive=True))
-    )
-    
-    # Filter for WAV files only (duration is checked after download)
-    audio_objects = [obj for obj in objects if obj.object_name.endswith(".wav")]
-    
-    if not audio_objects:
-        emit_log("No suitable audio files found in source bucket", "warn")
-        return None
-    
-    # Filter out recently used audio files
-    available = [obj for obj in audio_objects if obj.object_name not in USED_AUDIO_FILES]
-    
-    # Reset history if all audio files used
-    if not available:
-        emit_log("All audio files used, resetting history...", "info")
-        # Save last 5 items before clearing to avoid re-using most recent audio
-        recent_audio = USED_AUDIO_FILES[-5:] if len(USED_AUDIO_FILES) >= 5 else []
-        USED_AUDIO_FILES.clear()
-        USED_AUDIO_FILES.extend(recent_audio)
-        available = [obj for obj in audio_objects if obj.object_name not in USED_AUDIO_FILES]
-    
-    # Pick random audio file
-    chosen = random.choice(available)
-    USED_AUDIO_FILES.append(chosen.object_name)
-    if len(USED_AUDIO_FILES) > MAX_AUDIO_HISTORY:
-        USED_AUDIO_FILES[:] = USED_AUDIO_FILES[-MAX_AUDIO_HISTORY:]
-    
-    return chosen.object_name
 
 
 def _prompt_to_speak_payload(prompt: str) -> Dict[str, Any]:
@@ -361,27 +313,29 @@ async def synthesize_audio_for_participants(
     return output
 
 
-async def get_valid_participants_from_api() -> list[ParticipantInfo]:
-    """Get valid participants from the centralized API.
-    
-    The API service validates participants (HuggingFace, Chutes, plagiarism)
-    so we don't need to re-validate here.
-    
-    Returns:
-        List of valid ParticipantInfo objects
+async def get_valid_participants() -> list[ParticipantInfo]:
+    """Get valid participants for sample generation.
+
+    Default: the validator's own local registry (no API dependency). If
+    USE_LOCAL_REGISTRY is disabled, fall back to the centralized API.
     """
+    if USE_LOCAL_REGISTRY:
+        try:
+            from vocence.registry.local_registry import fetch_local_valid_participants
+            return await fetch_local_valid_participants()
+        except Exception as e:
+            emit_log(f"Failed to read local registry: {e}", "warn")
+            return []
     try:
         from vocence.adapters.api import create_service_client_from_wallet
-        
+
         client = create_service_client_from_wallet(
             wallet_name=COLDKEY_NAME,
             hotkey_name=HOTKEY_NAME,
             api_url=API_URL,
         )
-        
         try:
-            miners = await client.get_valid_miners()
-            return miners
+            return await client.get_valid_miners()
         finally:
             await client.close()
     except Exception as e:
@@ -390,18 +344,19 @@ async def get_valid_participants_from_api() -> list[ParticipantInfo]:
 
 
 async def generate_samples_continuously(
-    corpus_client: Minio,
     validator_client: Minio,
     openai_client: AsyncOpenAI,
     get_current_block: Callable[[], Awaitable[int]],
 ) -> None:
-    """Continuously generate evaluations: wait for block slot, then download audio from corpus, query participants, score, upload.
-    
+    """Continuously generate evaluations: wait for block slot, then pick audio from the local corpus, query participants, score, upload.
+
     Sample rounds run when (current_block % SAMPLE_SLOT_INTERVAL_BLOCKS) == SAMPLE_SLOT_OFFSET_BLOCKS, so 5 validators
     (id 0–4) are staggered at 0, 30, 60, 90, 120 every 150 blocks.
-    
+
+    Source audio comes from the validator's local corpus (see vocence.pipeline.corpus),
+    maintained independently by run_corpus_manager — no shared S3 corpus bucket.
+
     Args:
-        corpus_client: Minio client for corpus bucket (create_corpus_storage_client)
         validator_client: Minio client for validator's samples bucket (create_validator_storage_client)
         openai_client: AsyncOpenAI client for GPT-4o
         get_current_block: Async callable returning current chain block number (e.g. subtensor.get_current_block)
@@ -412,7 +367,7 @@ async def generate_samples_continuously(
         f"Sample generation loop starting (validator_id={VALIDATOR_ID}, slot every {SAMPLE_SLOT_INTERVAL_BLOCKS} blocks at offset {SAMPLE_SLOT_OFFSET_BLOCKS})",
         "start",
     )
-    emit_log(f"Using API for valid miners: {API_URL}", "info")
+    emit_log(f"Valid miners source: {'local registry' if USE_LOCAL_REGISTRY else f'API {API_URL}'}", "info")
 
     global _last_executed_slot_block
     round_num = 0
@@ -450,11 +405,12 @@ async def generate_samples_continuously(
             print_header(f"Sample Generation Round #{round_num}")
             emit_log(f"Current block: {block}", "info")
 
-            # 1. Get valid participants from centralized API
+            # 1. Get valid participants (local registry by default, else centralized API)
+            _src = "local registry" if USE_LOCAL_REGISTRY else "API"
             try:
-                valid_participants = await get_valid_participants_from_api()
+                valid_participants = await get_valid_participants()
             except Exception as e:
-                emit_log(f"Failed to get participants from API: {e}", "error")
+                emit_log(f"Failed to get participants from {_src}: {e}", "error")
                 await asyncio.sleep(SECONDS_PER_BLOCK)
                 continue
 
@@ -462,8 +418,8 @@ async def generate_samples_continuously(
                 emit_log("No valid participants found", "warn")
                 await asyncio.sleep(SECONDS_PER_BLOCK)
                 continue
-            
-            emit_log(f"Found {len(valid_participants)} valid participants from API", "info")
+
+            emit_log(f"Found {len(valid_participants)} valid participants from {_src}", "info")
             
             # Convert to dict for audio generation
             participants: Dict[str, Dict[str, Any]] = {
@@ -478,21 +434,16 @@ async def generate_samples_continuously(
                 for p in valid_participants
             }
             
-            # 2. Download random audio from corpus bucket (owner's bucket, corpus credentials)
-            audio_key = await select_random_audio(corpus_client)
-            if not audio_key:
+            # 2. Pick a random clip from the local corpus (per-validator, maintained by run_corpus_manager)
+            evaluation_id = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+            prepared = await prepare_source_audio(evaluation_id)
+            if not prepared:
+                emit_log("No corpus clip available yet (corpus still filling?), waiting", "warn")
                 await asyncio.sleep(SECONDS_PER_BLOCK)
                 continue
-            
-            emit_log(f"Selected audio: {audio_key}", "info")
-            
-            evaluation_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            audio_path = f"/tmp/source_audio_{evaluation_id}.wav"
-            
-            await asyncio.to_thread(
-                corpus_client.fget_object, AUDIO_SOURCE_BUCKET, audio_key, audio_path
-            )
-            emit_log(f"Downloaded audio: {os.path.getsize(audio_path):,} bytes", "info")
+            audio_path, corpus_clip_key = prepared
+
+            emit_log(f"Selected corpus clip: {corpus_clip_key} ({os.path.getsize(audio_path):,} bytes)", "info")
             
             # 3. Check duration min/max (validator expects 20–25s source audio); use full file as task
             duration = await get_audio_duration(audio_path)
@@ -658,10 +609,10 @@ async def generate_samples_continuously(
             from vocence.pipeline.evaluation import ELEMENT_WEIGHTS
             metadata = {
                 "evaluation_id": evaluation_id,
-                "created_at": datetime.now().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "source": {
-                    "bucket": AUDIO_SOURCE_BUCKET,
-                    "key": audio_key,
+                    "origin": "local_corpus",
+                    "key": corpus_clip_key,
                     "full_duration_seconds": duration,
                 },
                 "prompt": {
@@ -732,7 +683,7 @@ async def generate_samples_continuously(
                 await _cancel_live_evaluation_safe(evaluation_id)
         finally:
             # Cleanup temp files (always runs, even on exception)
-            if 'audio_path' in dir() and os.path.exists(audio_path):
+            if 'audio_path' in dir() and audio_path and os.path.exists(audio_path):
                 try:
                     os.remove(audio_path)
                 except OSError:

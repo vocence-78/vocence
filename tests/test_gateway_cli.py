@@ -33,23 +33,9 @@ class TestCLIInvocation:
         result = runner.invoke(cli, ["get-miners", "--help"])
         assert result.exit_code == 0
 
-    def test_owner_help(self):
-        result = runner.invoke(cli, ["owner", "--help"])
+    def test_services_corpus_help(self):
+        result = runner.invoke(cli, ["services", "corpus", "--help"])
         assert result.exit_code == 0
-
-    def test_owner_serve_help(self):
-        result = runner.invoke(cli, ["owner", "serve", "--help"])
-        assert result.exit_code == 0
-        assert "rounds" in result.output.lower()
-
-    def test_corpus_help(self):
-        result = runner.invoke(cli, ["corpus", "--help"])
-        assert result.exit_code == 0
-
-    def test_corpus_source_downloader_help(self):
-        result = runner.invoke(cli, ["corpus", "source-downloader", "--help"])
-        assert result.exit_code == 0
-        assert "rounds" in result.output.lower()
 
     def test_miner_help(self):
         result = runner.invoke(cli, ["miner", "--help"])

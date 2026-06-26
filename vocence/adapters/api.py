@@ -129,14 +129,13 @@ class ServiceClient:
         else:
             body = b""
         
-        # Prepare headers
-        headers = {"Content-Type": "application/json"}
-        if require_auth:
-            headers.update(self._sign_request(body))
-        
-        # Make request with retries
+        # Make request with retries. Re-sign per attempt so each retry gets a fresh
+        # nonce/timestamp — a reused signature would be rejected as replay/expired.
         last_error = None
         for attempt in range(API_MAX_RETRIES):
+            headers = {"Content-Type": "application/json"}
+            if require_auth:
+                headers.update(self._sign_request(body))
             try:
                 async with session.request(
                     method,
@@ -152,16 +151,25 @@ class ServiceClient:
                         raise PermissionError("Access denied")
                     elif response.status == 404:
                         raise ValueError(f"Not found: {endpoint}")
+                    elif response.status == 429 or response.status >= 500:
+                        # Transient server-side errors (rate limit, 5xx): retry with backoff.
+                        error_text = await response.text()
+                        last_error = Exception(f"API error {response.status}: {error_text}")
+                        if attempt < API_MAX_RETRIES - 1:
+                            emit_log(f"API {response.status}, retrying... ({endpoint})", "warn")
+                            await asyncio.sleep(2 ** attempt)
+                            continue
+                        raise last_error
                     else:
                         error_text = await response.text()
                         raise Exception(f"API error {response.status}: {error_text}")
-                        
+
             except aiohttp.ClientError as e:
                 last_error = e
                 if attempt < API_MAX_RETRIES - 1:
                     emit_log(f"API request failed, retrying... ({e})", "warn")
                     await asyncio.sleep(2 ** attempt)
-        
+
         raise last_error or Exception("Request failed")
     
     # =========================================================================
