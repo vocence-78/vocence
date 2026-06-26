@@ -101,6 +101,20 @@ vocence services corpus
 
 ---
 
+### `vocence services registry`
+
+**Purpose:** Run only the local miner registry. Validates miners from on-chain commitments (HuggingFace + Chutes + duplicate detection) on block-aligned boundaries and writes the valid set to the local SQLite DB (`REGISTRY_DB_PATH`); also mirrors the centralized blacklist (cached). Use this when splitting services; `serve`, `services generator`, and `services validator` already run it in the background.
+
+**Usage:**
+
+```bash
+vocence services registry
+```
+
+**Requires:** Chain RPC, `CHUTES_API_KEY` (chute liveness), disk for `REGISTRY_DB_PATH`. `HF_AUTH_TOKEN` optional.
+
+---
+
 ## Query commands
 
 ### `vocence get-miners`
@@ -179,6 +193,7 @@ vocence miner commit --model-name user/model --model-revision abc123 --chute-id 
 | `vocence services generator` | Validator: sample generation only (runs local corpus manager too). |
 | `vocence services validator` | Validator: weight setting only. |
 | `vocence services corpus` | Validator: local audio corpus manager only. |
+| `vocence services registry` | Validator: local miner registry (validation) only. |
 | `vocence get-miners` | Query: list miners from chain. |
 | `vocence miner push` | Miner: deploy model to Chutes. |
 | `vocence miner commit` | Miner: commit model + Chute ID to chain. |

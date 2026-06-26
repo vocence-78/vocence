@@ -8,6 +8,7 @@ Hippius S3 storage utilities for Vocence.
 import os
 import json
 import asyncio
+import tempfile
 from typing import Any, Dict
 
 from minio import Minio
@@ -110,19 +111,21 @@ async def upload_sample_data(
             size_kb = os.path.getsize(local_path) / 1024
             emit_log(f"Uploaded: {object_name} ({size_kb:.1f} KB)", "info")
 
-    # Upload metadata as JSON
-    metadata_json = json.dumps(metadata, indent=2)
-    metadata_path = f"/tmp/metadata_{sample_id}.json"
-    with open(metadata_path, "w") as f:
-        f.write(metadata_json)
-
-    object_name = f"{prefix}/metadata.json"
+    # Upload metadata as JSON via a secure temp file (unpredictable path).
+    metadata_path = None
     try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", suffix=".json", prefix="metadata_", delete=False
+        ) as f:
+            json.dump(metadata, f, indent=2)
+            metadata_path = f.name
+
+        object_name = f"{prefix}/metadata.json"
         await _fput_object_with_retry(storage_client, object_name, metadata_path)
         emit_log(f"Uploaded: {object_name}", "info")
     finally:
         # Cleanup temp metadata file even if the upload ultimately failed.
-        if os.path.exists(metadata_path):
+        if metadata_path and os.path.exists(metadata_path):
             os.remove(metadata_path)
 
     return prefix

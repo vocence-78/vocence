@@ -5,6 +5,7 @@ All configurable values are loaded from environment variables (.env or process e
 with sensible defaults defined here. Load .env first so imports see env vars.
 """
 
+import math
 import os
 from pathlib import Path
 from typing import List
@@ -61,6 +62,8 @@ MAX_EVALS_FOR_SCORING = int(os.environ.get("MAX_EVALS_FOR_SCORING", "50"))
 # between large- and small-stake validators (0.5 = sqrt, 0.25 = fourth root,
 # 1.0 = linear). Default 0.25 keeps stake ordering while tightening influence spread.
 VALIDATOR_WEIGHT_EXPONENT = float(os.environ.get("VALIDATOR_WEIGHT_EXPONENT", "0.25"))
+if not math.isfinite(VALIDATOR_WEIGHT_EXPONENT) or VALIDATOR_WEIGHT_EXPONENT < 0:
+    raise ValueError("VALIDATOR_WEIGHT_EXPONENT must be a finite value >= 0")
 
 # Chutes API configuration
 CHUTES_BASE_URL = os.environ.get("CHUTES_BASE_URL", "https://api.chutes.ai")
@@ -178,6 +181,10 @@ ACTIVE_VALIDATOR_MIN_STAKE = float(os.environ.get("ACTIVE_VALIDATOR_MIN_STAKE", 
 # pinned block within node state-pruning (~256 blocks) so it stays queryable.
 REGISTRY_VALIDATION_INTERVAL_BLOCKS = int(os.environ.get("REGISTRY_VALIDATION_INTERVAL_BLOCKS", "300"))
 REGISTRY_VALIDATION_MAX_LAG_BLOCKS = int(os.environ.get("REGISTRY_VALIDATION_MAX_LAG_BLOCKS", "200"))
+if REGISTRY_VALIDATION_INTERVAL_BLOCKS <= 0:
+    raise ValueError("REGISTRY_VALIDATION_INTERVAL_BLOCKS must be > 0")
+if REGISTRY_VALIDATION_MAX_LAG_BLOCKS < 0:
+    raise ValueError("REGISTRY_VALIDATION_MAX_LAG_BLOCKS must be >= 0")
 
 # Auth (owner API)
 SIGNATURE_EXPIRY_SECONDS = int(os.environ.get("SIGNATURE_EXPIRY_SECONDS", "300"))

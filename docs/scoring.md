@@ -244,9 +244,10 @@ Formula:
 
 ```text
 global_win_rate(miner) =
-  sum(stake_v**0.25 * win_rate_v)
+  sum(stake_v**VALIDATOR_WEIGHT_EXPONENT * win_rate_v)
   /
-  sum(stake_v**0.25)
+  sum(stake_v**VALIDATOR_WEIGHT_EXPONENT)
+  # VALIDATOR_WEIGHT_EXPONENT defaults to 0.25 (fourth-root)
 ```
 
 Only validators that actually contributed data for that miner are included in the denominator.

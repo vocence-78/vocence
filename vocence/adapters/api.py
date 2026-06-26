@@ -129,14 +129,13 @@ class ServiceClient:
         else:
             body = b""
         
-        # Prepare headers
-        headers = {"Content-Type": "application/json"}
-        if require_auth:
-            headers.update(self._sign_request(body))
-        
-        # Make request with retries
+        # Make request with retries. Re-sign per attempt so each retry gets a fresh
+        # nonce/timestamp — a reused signature would be rejected as replay/expired.
         last_error = None
         for attempt in range(API_MAX_RETRIES):
+            headers = {"Content-Type": "application/json"}
+            if require_auth:
+                headers.update(self._sign_request(body))
             try:
                 async with session.request(
                     method,

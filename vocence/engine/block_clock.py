@@ -10,12 +10,16 @@ RPC source per process and avoids subtensor rate-limit pressure.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Awaitable, Callable, Optional
 
 from vocence.shared.logging import emit_log
 from vocence.domain.config import SUBTENSOR_TIMEOUT_SEC
 
 SECONDS_PER_BLOCK = 12
+# Consider the cached block stale if the poller hasn't refreshed it within this window
+# (one failed poll ~ SUBTENSOR_TIMEOUT_SEC, plus a couple of block-times of slack).
+_STALE_AFTER_SEC = SUBTENSOR_TIMEOUT_SEC + SECONDS_PER_BLOCK * 2
 
 
 class BlockClock:
@@ -23,17 +27,22 @@ class BlockClock:
 
     def __init__(self) -> None:
         self._block: Optional[int] = None
+        self._updated_at: Optional[float] = None
 
     def set(self, block: int) -> None:
         self._block = block
+        self._updated_at = time.monotonic()
 
     def get(self) -> Optional[int]:
         return self._block
 
     async def get_async(self) -> int:
-        """Return the cached block; raise if not yet populated (callers wait/retry)."""
+        """Return the cached block; raise if unset or stale so callers don't act on a
+        block the poller stopped refreshing (they wait/retry instead)."""
         if self._block is None:
             raise RuntimeError("block clock not ready")
+        if self._updated_at is None or (time.monotonic() - self._updated_at) > _STALE_AFTER_SEC:
+            raise RuntimeError("block clock stale")
         return self._block
 
 
