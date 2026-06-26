@@ -405,11 +405,12 @@ async def generate_samples_continuously(
             print_header(f"Sample Generation Round #{round_num}")
             emit_log(f"Current block: {block}", "info")
 
-            # 1. Get valid participants from centralized API
+            # 1. Get valid participants (local registry by default, else centralized API)
+            _src = "local registry" if USE_LOCAL_REGISTRY else "API"
             try:
                 valid_participants = await get_valid_participants()
             except Exception as e:
-                emit_log(f"Failed to get participants from API: {e}", "error")
+                emit_log(f"Failed to get participants from {_src}: {e}", "error")
                 await asyncio.sleep(SECONDS_PER_BLOCK)
                 continue
 
@@ -417,8 +418,8 @@ async def generate_samples_continuously(
                 emit_log("No valid participants found", "warn")
                 await asyncio.sleep(SECONDS_PER_BLOCK)
                 continue
-            
-            emit_log(f"Found {len(valid_participants)} valid participants from API", "info")
+
+            emit_log(f"Found {len(valid_participants)} valid participants from {_src}", "info")
             
             # Convert to dict for audio generation
             participants: Dict[str, Dict[str, Any]] = {
