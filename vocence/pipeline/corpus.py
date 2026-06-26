@@ -75,6 +75,10 @@ def _extract_clip_ffmpeg_sync(src_path: str, start_sec: float, duration_sec: flo
         "-ss", str(start_sec), "-i", src_path,
         "-t", str(round(actual_dur, 2)),
         "-ar", "22050", "-ac", "1", "-c:a", "pcm_s16le",
+        # Force the WAV muxer: out_path is written to a "<uuid>.wav.tmp" temp name
+        # (atomic rename), and ffmpeg otherwise infers the format from the extension
+        # — ".tmp" is unknown and would fail. -f wav makes the extension irrelevant.
+        "-f", "wav",
         out_path,
     ]
     r = subprocess.run(cmd, capture_output=True, timeout=60)
@@ -207,12 +211,14 @@ def _download_one_batch_local_sync() -> int:
     min_chapter_sec = LIBRIVOX_CLIPS_PER_CHAPTER * LIBRIVOX_CLIP_MAX_SEC + 60
     chosen = _pick_random_chapter_sync(rng, min_chapter_sec)
     if not chosen:
+        emit_log("Corpus round: no suitable chapter found", "warn")
         return 0
 
     book, section = chosen
     listen_url = section.get("listen_url")
     duration_sec = _playtime_sec(section)
     if not listen_url or duration_sec < min_chapter_sec:
+        emit_log("Corpus round: chosen chapter unusable (no url / too short)", "warn")
         return 0
 
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
@@ -220,6 +226,7 @@ def _download_one_batch_local_sync() -> int:
     written = 0
     try:
         if not _download_librivox_chapter_sync(listen_url, chapter_path):
+            emit_log("Corpus round: chapter download failed", "warn")
             return 0
         time.sleep(0.5)
 
@@ -244,6 +251,8 @@ def _download_one_batch_local_sync() -> int:
         if written:
             section_title = (section.get("title") or "chapter")[:30]
             emit_log(f"Corpus: added {written} clips from {section_title}", "success")
+        else:
+            emit_log("Corpus round: chapter downloaded but 0 clips extracted (ffmpeg)", "warn")
         return written
     finally:
         try:
