@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import re
 import shutil
 import subprocess
 import tempfile
@@ -45,20 +46,14 @@ from vocence.domain.config import (
     MAX_AUDIO_HISTORY,
 )
 
-# EARS emotion (file token) -> pipeline `emotion` enum value. Only emotions that have
-# a clean counterpart in VOICE_TRAIT_ENUMS["emotion"] are pulled. EARS has no "serious".
-EARS_EMOTION_MAP = {
-    "neutral":  "neutral",
-    "amusement": "happy",
-    "sadness":  "sad",
-    "anger":    "angry",
-    "serenity": "calm",
-    "extasy":   "excited",
-    "fear":     "fearful",
-}
-# Per emotion, EARS ships a spontaneous "freeform" file and a read "sentences" file —
-# both expressive; we use both to widen the pool.
-_EARS_STYLES = ("freeform", "sentences")
+# We pull EVERY EARS emotional `freeform` file (all 22 emotion categories), not a
+# hand-picked subset. Rationale: the validator's judge re-derives the source clip's
+# `emotion` (one of the 8-enum) from the audio at scoring time, so we don't need to
+# pre-map EARS labels — we only need expressive source clips. Pulling all 22 emotions
+# maximizes the (finite) pool size and its emotional spread, which is what limits
+# overfitting here. EARS `sentences` files are ~9-12s (below the 15s floor) so only
+# `freeform` (~15-20s) is used.
+_EARS_FREEFORM_RE = re.compile(r"^(p\d+)/emo_([a-z]+)_freeform\.wav$")
 
 # Track which EARS speakers we've already extracted so restarts don't re-download.
 _PROCESSED_MARKER = ".processed_speakers"
@@ -197,29 +192,32 @@ def _extract_speaker_clips_sync(speaker: str, zip_path: str, rng: random.Random)
     except zipfile.BadZipFile:
         emit_log(f"Emotion corpus: {speaker} zip is corrupt", "warn")
         return 0
-    names = set(zf.namelist())
+    # Every emo_*_freeform.wav for this speaker (all 22 EARS emotion categories).
+    members = sorted(
+        n for n in zf.namelist()
+        if n.startswith(f"{speaker}/") and _EARS_FREEFORM_RE.match(n)
+    )
     with tempfile.TemporaryDirectory() as tmpd:
-        for ears_emo, label in EARS_EMOTION_MAP.items():
-            for style in _EARS_STYLES:
-                member = f"{speaker}/emo_{ears_emo}_{style}.wav"
-                if member not in names:
-                    continue
-                raw = os.path.join(tmpd, f"{ears_emo}_{style}.wav")
+        for member in members:
+            ears_emo = _EARS_FREEFORM_RE.match(member).group(2)
+            raw = os.path.join(tmpd, f"{ears_emo}.wav")
+            try:
+                with zf.open(member) as s, open(raw, "wb") as o:
+                    shutil.copyfileobj(s, o, length=1024 * 1024)
+            except (KeyError, OSError):
+                continue
+            # Filename keeps the EARS emotion token as provenance only; the scored
+            # emotion comes from the judge re-labelling the audio at round time.
+            final = os.path.join(EMOTION_CORPUS_LOCAL_DIR, f"{ears_emo}_{speaker}_{uuid.uuid4().hex}.wav")
+            tmp_out = final + ".tmp"
+            if _cut_to_corpus_format_sync(raw, tmp_out, rng):
+                os.replace(tmp_out, final)  # atomic on same filesystem
+                written += 1
+            elif os.path.isfile(tmp_out):
                 try:
-                    with zf.open(member) as s, open(raw, "wb") as o:
-                        shutil.copyfileobj(s, o, length=1024 * 1024)
-                except (KeyError, OSError):
-                    continue
-                final = os.path.join(EMOTION_CORPUS_LOCAL_DIR, f"{label}_{speaker}_{uuid.uuid4().hex}.wav")
-                tmp_out = final + ".tmp"
-                if _cut_to_corpus_format_sync(raw, tmp_out, rng):
-                    os.replace(tmp_out, final)  # atomic on same filesystem
-                    written += 1
-                elif os.path.isfile(tmp_out):
-                    try:
-                        os.remove(tmp_out)
-                    except OSError:
-                        pass
+                    os.remove(tmp_out)
+                except OSError:
+                    pass
     return written
 
 

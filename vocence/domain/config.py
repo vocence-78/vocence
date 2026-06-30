@@ -292,13 +292,15 @@ EMOTION_TASK_FRACTION = float(os.environ.get("EMOTION_TASK_FRACTION", "0.30"))
 EMOTION_CORPUS_LOCAL_DIR = os.environ.get(
     "EMOTION_CORPUS_LOCAL_DIR", os.path.join(os.getcwd(), "data", "corpus_emotion")
 )
-EMOTION_CORPUS_MAX_ENTRIES = int(os.environ.get("EMOTION_CORPUS_MAX_ENTRIES", "1500"))
+EMOTION_CORPUS_MAX_ENTRIES = int(os.environ.get("EMOTION_CORPUS_MAX_ENTRIES", "3000"))
 # EARS emotional clips run shorter than LibriVox; allow 15s floor on emotion rounds
 # (vs the 20s neutral floor). Max stays at AUDIO_SOURCE_MAX_DURATION_SEC (25s).
 EMOTION_SOURCE_MIN_DURATION_SEC = int(os.environ.get("EMOTION_SOURCE_MIN_DURATION_SEC", "15"))
-# EARS GitHub release: per-speaker zips p001.zip..p107.zip (~590MB each). Number of
-# speakers to pull into the emotional corpus; 30 ≈ 18GB one-time fill on testnet.
-EARS_MAX_SPEAKERS = int(os.environ.get("EARS_MAX_SPEAKERS", "30"))
+# EARS GitHub release: per-speaker zips p001.zip..p107.zip (~590MB each). We pull every
+# emo_*_freeform.wav per speaker (all 22 emotion categories) — ~20 usable clips/speaker.
+# Default 107 = the whole dataset (~62GB one-time fill, ~2000 emotional clips). Lower for
+# a lighter testnet bring-up; the corpus fills speaker-by-speaker so rounds start early.
+EARS_MAX_SPEAKERS = int(os.environ.get("EARS_MAX_SPEAKERS", "107"))
 EARS_RELEASE_BASE = os.environ.get(
     "EARS_RELEASE_BASE",
     "https://github.com/facebookresearch/ears_dataset/releases/download/dataset",
