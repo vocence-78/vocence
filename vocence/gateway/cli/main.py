@@ -75,14 +75,14 @@ def start_generator():
     Uses block-based slots (same as full validator); requires chain access for current block.
     """
     import bittensor as bt
-    from openai import AsyncOpenAI
 
     import asyncio
-    from vocence.domain.config import OPENAI_AUTH_KEY, CHUTES_AUTH_KEY, CHAIN_NETWORK, USE_LOCAL_REGISTRY
+    from vocence.domain.config import GEMINI_AUTH_KEY, CHUTES_AUTH_KEY, CHAIN_NETWORK, USE_LOCAL_REGISTRY
     from vocence.shared.logging import emit_log, print_header
     from vocence.adapters.storage import create_validator_storage_client
     from vocence.pipeline.generation import generate_samples_continuously
     from vocence.pipeline.corpus import run_corpus_manager
+    from vocence.pipeline.emotion_corpus import run_emotion_corpus_manager
     from vocence.engine.block_clock import BlockClock, run_block_poller
     from vocence.engine.coordinator import _reconnect_subtensor
 
@@ -92,26 +92,29 @@ def start_generator():
         if not CHUTES_AUTH_KEY:
             emit_log("CHUTES_AUTH_KEY environment variable required", "error")
             return
-        if not OPENAI_AUTH_KEY:
-            emit_log("OPENAI_AUTH_KEY environment variable required", "error")
+        if not GEMINI_AUTH_KEY:
+            emit_log("GEMINI_API_KEY (or GOOGLE_API_KEY) environment variable required", "error")
             return
 
         # One connection + one block poller; tasks read the shared clock.
         subtensor_ref = {"client": bt.AsyncSubtensor(network=CHAIN_NETWORK)}
         clock = BlockClock()
         validator_client = create_validator_storage_client()
-        openai_client = AsyncOpenAI(api_key=OPENAI_AUTH_KEY)
+        # AudioJudge builds its own Gemini client from GEMINI_AUTH_KEY; pass None as the
+        # vestigial judge_client arg.
+        judge_client = None
 
         bg_tasks = [
             asyncio.create_task(run_block_poller(subtensor_ref, clock, _reconnect_subtensor)),
             asyncio.create_task(run_corpus_manager()),
+            asyncio.create_task(run_emotion_corpus_manager()),
         ]
         if USE_LOCAL_REGISTRY:
             from vocence.registry.local_registry import run_miner_registry
             bg_tasks.append(asyncio.create_task(run_miner_registry(get_block=clock.get_async, subtensor_ref=subtensor_ref)))
         try:
             await generate_samples_continuously(
-                validator_client, openai_client, clock.get_async
+                validator_client, judge_client, clock.get_async
             )
         finally:
             for t in bg_tasks:
@@ -135,6 +138,28 @@ def start_corpus():
     async def run():
         print_header("Vocence Local Corpus Manager Starting")
         await run_corpus_manager()
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        pass
+
+
+@services.command("emotion-corpus")
+def start_emotion_corpus():
+    """Start the emotional (EARS) corpus manager only.
+
+    Downloads EARS speaker zips and extracts 15-25s emotional clips (mapped onto the
+    pipeline's `emotion` enum) into EMOTION_CORPUS_LOCAL_DIR, pruning beyond
+    EMOTION_CORPUS_MAX_ENTRIES. Run standalone when corpus upkeep is split out.
+    """
+    import asyncio
+    from vocence.shared.logging import print_header
+    from vocence.pipeline.emotion_corpus import run_emotion_corpus_manager
+
+    async def run():
+        print_header("Vocence Emotional Corpus Manager Starting")
+        await run_emotion_corpus_manager()
 
     try:
         asyncio.run(run())

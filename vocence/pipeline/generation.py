@@ -18,7 +18,6 @@ from typing import Dict, Any, Awaitable, Callable
 
 import aiohttp
 from minio import Minio
-from openai import AsyncOpenAI
 
 from vocence.domain.config import (
     API_URL,
@@ -28,7 +27,9 @@ from vocence.domain.config import (
     CLIP_LENGTH_SECONDS,
     AUDIO_SOURCE_MIN_DURATION_SEC,
     AUDIO_SOURCE_MAX_DURATION_SEC,
-    GPT_AUDIO_MODEL,
+    EMOTION_TASK_FRACTION,
+    EMOTION_SOURCE_MIN_DURATION_SEC,
+    EVAL_AUDIO_MODEL,
     MAX_PARALLEL_MINERS,
     MAX_PARALLEL_EVALS,
     QUERY_TIMEOUT,
@@ -52,7 +53,9 @@ from vocence.pipeline.evaluation import (
 )
 from vocence.adapters.chutes import fetch_chute_details, construct_chute_endpoint
 from vocence.pipeline.corpus import prepare_source_audio
+from vocence.pipeline.emotion_corpus import prepare_source_audio_emotion, emotion_corpus_count
 from vocence.domain.entities import ParticipantInfo
+import random
 
 # ~1 block every 12s on typical chains; used when waiting for next block
 SECONDS_PER_BLOCK = 12
@@ -345,7 +348,7 @@ async def get_valid_participants() -> list[ParticipantInfo]:
 
 async def generate_samples_continuously(
     validator_client: Minio,
-    openai_client: AsyncOpenAI,
+    judge_client: Any,
     get_current_block: Callable[[], Awaitable[int]],
 ) -> None:
     """Continuously generate evaluations: wait for block slot, then pick audio from the local corpus, query participants, score, upload.
@@ -358,7 +361,7 @@ async def generate_samples_continuously(
 
     Args:
         validator_client: Minio client for validator's samples bucket (create_validator_storage_client)
-        openai_client: AsyncOpenAI client for GPT-4o
+        judge_client: unused passthrough (AudioJudge builds its own Gemini client)
         get_current_block: Async callable returning current chain block number (e.g. subtensor.get_current_block)
     """
     # Ensure validator's samples bucket exists
@@ -434,21 +437,37 @@ async def generate_samples_continuously(
                 for p in valid_participants
             }
             
-            # 2. Pick a random clip from the local corpus (per-validator, maintained by run_corpus_manager)
+            # 2. Pick a random source clip. With probability EMOTION_TASK_FRACTION draw from the
+            #    emotional corpus (EARS) instead of neutral LibriVox — but only when that corpus
+            #    has clips, so a still-filling emotion corpus never blocks a round. The downstream
+            #    pipeline (trait extraction → instruction → scoring) is identical for both sources;
+            #    only the source emotion (and the min-duration floor) differs.
             evaluation_id = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
-            prepared = await prepare_source_audio(evaluation_id)
+            use_emotion = (random.random() < EMOTION_TASK_FRACTION) and (emotion_corpus_count() > 0)
+            if use_emotion:
+                prepared = await prepare_source_audio_emotion(evaluation_id)
+                source_origin = "local_corpus_emotion"
+                min_duration = EMOTION_SOURCE_MIN_DURATION_SEC
+            else:
+                prepared = await prepare_source_audio(evaluation_id)
+                source_origin = "local_corpus"
+                min_duration = AUDIO_SOURCE_MIN_DURATION_SEC
             if not prepared:
                 emit_log("No corpus clip available yet (corpus still filling?), waiting", "warn")
                 await asyncio.sleep(SECONDS_PER_BLOCK)
                 continue
             audio_path, corpus_clip_key = prepared
 
-            emit_log(f"Selected corpus clip: {corpus_clip_key} ({os.path.getsize(audio_path):,} bytes)", "info")
-            
-            # 3. Check duration min/max (validator expects 20–25s source audio); use full file as task
+            emit_log(
+                f"Selected {'emotion' if use_emotion else 'neutral'} corpus clip: "
+                f"{corpus_clip_key} ({os.path.getsize(audio_path):,} bytes)",
+                "info",
+            )
+
+            # 3. Check duration min/max (neutral: 20-25s; emotion rounds: 15-25s). Use full file as task.
             duration = await get_audio_duration(audio_path)
-            if duration < AUDIO_SOURCE_MIN_DURATION_SEC:
-                emit_log(f"Audio too short ({duration:.1f}s < {AUDIO_SOURCE_MIN_DURATION_SEC}s), skipping", "warn")
+            if duration < min_duration:
+                emit_log(f"Audio too short ({duration:.1f}s < {min_duration}s), skipping", "warn")
                 os.remove(audio_path)
                 await asyncio.sleep(SECONDS_PER_BLOCK)
                 continue
@@ -463,7 +482,7 @@ async def generate_samples_continuously(
             # transcription, we abort the round entirely — no miner queries, no live-evaluation
             # notification to the owner API, no evaluation data submitted. The validator will try
             # again at the next sample slot.
-            source_traits = await try_extract_source_traits_async(openai_client, audio_path)
+            source_traits = await try_extract_source_traits_async(judge_client, audio_path)
             if source_traits is None:
                 emit_log(
                     f"Round #{round_num}: source trait extraction failed (OpenAI judge unavailable). "
@@ -535,7 +554,7 @@ async def generate_samples_continuously(
             ) -> tuple[str, Dict[str, Any], str, str, str | None, Dict[str, Any]]:
                 async with eval_semaphore:
                     comparison = await score_miner_against_spec_async(
-                        openai_client,
+                        judge_client,
                         participant_audio_path,
                         source_traits,
                         source_audio_path=audio_path,
@@ -611,12 +630,12 @@ async def generate_samples_continuously(
                 "evaluation_id": evaluation_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "source": {
-                    "origin": "local_corpus",
+                    "origin": source_origin,
                     "key": corpus_clip_key,
                     "full_duration_seconds": duration,
                 },
                 "prompt": {
-                    "model": GPT_AUDIO_MODEL,
+                    "model": EVAL_AUDIO_MODEL,
                     "text": description,
                     "spec": source_traits,
                     "element_weights": ELEMENT_WEIGHTS,

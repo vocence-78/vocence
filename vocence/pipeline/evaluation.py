@@ -7,7 +7,7 @@ Evaluation model (v2, spec-based pointwise):
 3. Extract script + voice traits from the miner's generated audio with the same pointwise call.
 4. Score each element (script, gender, pitch, speed, age_group, emotion, tone, accent) against the source spec, weight, and sum to a final score in [0, 1].
 
-Model: gpt-audio-1.5 (pinned via GPT_AUDIO_MODEL in vocence.domain.config). OpenAI key only.
+Model: gemini-2.5-pro (pinned via EVAL_AUDIO_MODEL in vocence.domain.config). Gemini key only.
 """
 
 import asyncio
@@ -16,7 +16,7 @@ import random
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from vocence.domain.config import GPT_AUDIO_MODEL, OPENAI_AUTH_KEY
+from vocence.domain.config import EVAL_AUDIO_MODEL, GEMINI_AUTH_KEY
 from vocence.shared.logging import emit_log
 
 
@@ -142,9 +142,13 @@ Example response:
 # ---------------------------------------------------------------------------
 
 def _get_judge():
-    """Lazy-create AudioJudge with OpenAI key from config (OPENAI_AUTH_KEY or OPENAI_API_KEY in .env)."""
+    """Lazy-create AudioJudge with the Gemini key from config (GEMINI_API_KEY or GOOGLE_API_KEY in .env).
+
+    AudioJudge routes by model name: an `EVAL_AUDIO_MODEL` containing "gemini" uses the
+    Gemini backend for both pointwise and pairwise calls. OpenAI is no longer used.
+    """
     from audiojudge import AudioJudge
-    return AudioJudge(openai_api_key=OPENAI_AUTH_KEY, google_api_key=None)
+    return AudioJudge(openai_api_key=None, google_api_key=GEMINI_AUTH_KEY)
 
 
 def _normalize_trait_value(key: str, value: Any) -> str:
@@ -208,7 +212,7 @@ async def _judge_audio_pointwise(
                 audio_path=audio_path,
                 system_prompt=system_prompt,
                 user_prompt=None,
-                model=GPT_AUDIO_MODEL,
+                model=EVAL_AUDIO_MODEL,
                 concatenation_method="no_concatenation",
                 temperature=0.0,
                 max_tokens=500,
@@ -228,7 +232,7 @@ async def _judge_audio_pointwise(
     return _parse_traits_response(response_text)
 
 
-async def try_extract_source_traits_async(openai_client: Any, audio_path: str) -> Optional[Dict[str, Any]]:
+async def try_extract_source_traits_async(judge_client: Any, audio_path: str) -> Optional[Dict[str, Any]]:
     """Strict source-audio trait extraction for round-driving prompts.
 
     Uses SOURCE_DESCRIPTION_SYSTEM so the result includes both the structured 8-field
@@ -254,7 +258,7 @@ async def try_extract_source_traits_async(openai_client: Any, audio_path: str) -
     return traits
 
 
-async def get_transcription_and_traits_async(openai_client: Any, audio_path: str) -> Dict[str, Any]:
+async def get_transcription_and_traits_async(judge_client: Any, audio_path: str) -> Dict[str, Any]:
     """Lenient trait extraction for per-miner scoring.
 
     Returns the parsed traits on success, or _FALLBACK_TRAITS (neutral defaults +
@@ -405,7 +409,7 @@ Optionally add a short reason on the next line."""
 
 
 async def compare_naturalness_async(
-    openai_client: Any,
+    judge_client: Any,
     source_audio_path: str,
     miner_audio_path: str,
     task_description: str,
@@ -436,7 +440,7 @@ async def compare_naturalness_async(
                 audio2_path=second_path,
                 system_prompt=system_prompt,
                 user_prompt=None,
-                model=GPT_AUDIO_MODEL,
+                model=EVAL_AUDIO_MODEL,
                 concatenation_method="no_concatenation",
                 temperature=0.0,
                 max_tokens=200,
@@ -470,7 +474,7 @@ async def compare_naturalness_async(
 
 
 async def score_miner_against_spec_async(
-    openai_client: Any,
+    judge_client: Any,
     miner_audio_path: str,
     source_traits: Dict[str, Any],
     source_audio_path: Optional[str] = None,
@@ -493,10 +497,10 @@ async def score_miner_against_spec_async(
           "generated_artifacts": [],
         }
     """
-    extract_coro = get_transcription_and_traits_async(openai_client, miner_audio_path)
+    extract_coro = get_transcription_and_traits_async(judge_client, miner_audio_path)
     if source_audio_path:
         naturalness_coro = compare_naturalness_async(
-            openai_client, source_audio_path, miner_audio_path, task_description
+            judge_client, source_audio_path, miner_audio_path, task_description
         )
         miner_traits, naturalness = await asyncio.gather(extract_coro, naturalness_coro)
     else:
@@ -528,14 +532,14 @@ async def score_miner_against_spec_async(
 # Back-compat shims
 # ---------------------------------------------------------------------------
 
-async def generate_description_async(openai_client: Any, audio_path: str) -> str:
+async def generate_description_async(judge_client: Any, audio_path: str) -> str:
     """Get a TTS task prompt from one full audio (transcription + traits)."""
-    traits = await get_transcription_and_traits_async(openai_client, audio_path)
+    traits = await get_transcription_and_traits_async(judge_client, audio_path)
     return format_task_prompt_for_tts(traits)
 
 
 async def forced_choice_assessment_async(
-    openai_client: Any,
+    judge_client: Any,
     original_audio_path: str,
     generated_audio_path: str,
     task_prompt: str,
@@ -546,9 +550,9 @@ async def forced_choice_assessment_async(
     against that spec. Prefer calling score_miner_against_spec_async directly with
     a pre-extracted source_traits dict to avoid the redundant source extraction.
     """
-    source_traits = await get_transcription_and_traits_async(openai_client, original_audio_path)
+    source_traits = await get_transcription_and_traits_async(judge_client, original_audio_path)
     result = await score_miner_against_spec_async(
-        openai_client,
+        judge_client,
         generated_audio_path,
         source_traits,
         source_audio_path=original_audio_path,

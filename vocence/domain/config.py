@@ -91,11 +91,12 @@ AUDIO_SAMPLES_BUCKET = os.environ.get("AUDIO_SAMPLES_BUCKET") or f"vocence-sampl
 HIPPIUS_VALIDATOR_ACCESS_KEY = os.environ.get("HIPPIUS_VALIDATOR_ACCESS_KEY") or os.environ.get("HIPPIUS_ACCESS_KEY", "")
 HIPPIUS_VALIDATOR_SECRET_KEY = os.environ.get("HIPPIUS_VALIDATOR_SECRET_KEY") or os.environ.get("HIPPIUS_SECRET_KEY", "")
 
-# OpenAI configuration (OPENAI_AUTH_KEY or OPENAI_API_KEY from .env)
-OPENAI_AUTH_KEY = os.environ.get("OPENAI_AUTH_KEY") or os.environ.get("OPENAI_API_KEY")
+# Gemini configuration (GEMINI_API_KEY or GOOGLE_API_KEY from .env).
+# Gemini replaces OpenAI as the audio judge — same scoring logic, different model only.
+GEMINI_AUTH_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 # Model for audio-in description and comparison (transcription + traits, first/second choice).
 # Hardcoded — must match across all honest validators for cross-validator scoring to converge.
-GPT_AUDIO_MODEL = "gpt-audio-1.5"
+EVAL_AUDIO_MODEL = "gemini-2.5-pro"
 
 # Audio generation placeholder model
 PLACEHOLDER_TTS_ENDPOINT = os.environ.get(
@@ -275,3 +276,30 @@ CORPUS_RATE_LIMIT_BACKOFF_SEC = int(os.environ.get("CORPUS_RATE_LIMIT_BACKOFF_SE
 LIBRIVOX_CLIPS_PER_CHAPTER = int(os.environ.get("LIBRIVOX_CLIPS_PER_CHAPTER", "10"))
 LIBRIVOX_CLIP_MIN_SEC = int(os.environ.get("LIBRIVOX_CLIP_MIN_SEC", "20"))
 LIBRIVOX_CLIP_MAX_SEC = int(os.environ.get("LIBRIVOX_CLIP_MAX_SEC", "25"))
+
+# ---------------------------------------------------------------------------
+# Emotional source corpus (EARS) — testnet task-mix add-on.
+# A fraction of sample rounds draw their source clip from emotionally-expressive
+# audio (EARS: 48 kHz anechoic, mapped onto the existing `emotion` trait enum)
+# instead of neutral LibriVox narration. Emotion is ALREADY a scored trait, so this
+# only changes audio source prep — no scoring change. The task fraction and dataset
+# spec must match across honest validators (same role as EVAL_AUDIO_MODEL) for
+# cross-validator win-rates to converge.
+# ---------------------------------------------------------------------------
+# Probability a given sample round uses the emotional corpus (vs neutral LibriVox).
+EMOTION_TASK_FRACTION = float(os.environ.get("EMOTION_TASK_FRACTION", "0.30"))
+# Separate on-disk dir for emotional source clips (kept apart from the LibriVox corpus).
+EMOTION_CORPUS_LOCAL_DIR = os.environ.get(
+    "EMOTION_CORPUS_LOCAL_DIR", os.path.join(os.getcwd(), "data", "corpus_emotion")
+)
+EMOTION_CORPUS_MAX_ENTRIES = int(os.environ.get("EMOTION_CORPUS_MAX_ENTRIES", "1500"))
+# EARS emotional clips run shorter than LibriVox; allow 15s floor on emotion rounds
+# (vs the 20s neutral floor). Max stays at AUDIO_SOURCE_MAX_DURATION_SEC (25s).
+EMOTION_SOURCE_MIN_DURATION_SEC = int(os.environ.get("EMOTION_SOURCE_MIN_DURATION_SEC", "15"))
+# EARS GitHub release: per-speaker zips p001.zip..p107.zip (~590MB each). Number of
+# speakers to pull into the emotional corpus; 30 ≈ 18GB one-time fill on testnet.
+EARS_MAX_SPEAKERS = int(os.environ.get("EARS_MAX_SPEAKERS", "30"))
+EARS_RELEASE_BASE = os.environ.get(
+    "EARS_RELEASE_BASE",
+    "https://github.com/facebookresearch/ears_dataset/releases/download/dataset",
+)

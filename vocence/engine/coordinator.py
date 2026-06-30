@@ -17,7 +17,6 @@ from typing import Dict, Any, List
 
 import bittensor as bt
 from minio import Minio
-from openai import AsyncOpenAI
 
 from vocence.domain.config import (
     API_URL,
@@ -31,7 +30,7 @@ from vocence.domain.config import (
     MAX_EVALS_FOR_SCORING,
     BURN_UID,
     CHUTES_AUTH_KEY,
-    OPENAI_AUTH_KEY,
+    GEMINI_AUTH_KEY,
     COLDKEY_NAME,
     HOTKEY_NAME,
     CHAIN_NETWORK,
@@ -520,8 +519,8 @@ async def main() -> None:
     if not CHUTES_AUTH_KEY:
         emit_log("CHUTES_AUTH_KEY environment variable required", "error")
         return
-    if not OPENAI_AUTH_KEY:
-        emit_log("OPENAI_AUTH_KEY environment variable required", "error")
+    if not GEMINI_AUTH_KEY:
+        emit_log("GEMINI_API_KEY (or GOOGLE_API_KEY) environment variable required", "error")
         return
 
     emit_log(f"Valid miners source: {'local registry' if USE_LOCAL_REGISTRY else f'API {API_URL}'}", "info")
@@ -532,7 +531,9 @@ async def main() -> None:
     subtensor_ref: dict = {"client": bt.AsyncSubtensor(network=CHAIN_NETWORK)}
     wallet = bt.Wallet(name=COLDKEY_NAME, hotkey=HOTKEY_NAME)
     validator_client = create_validator_storage_client()
-    openai_client = AsyncOpenAI(api_key=OPENAI_AUTH_KEY)
+    # The judge (AudioJudge) builds its own Gemini client from GEMINI_AUTH_KEY; no
+    # separate client object is needed. Pass None as the vestigial judge_client arg.
+    judge_client = None
     
     # Log configuration
     emit_log(f"Wallet: {COLDKEY_NAME}/{HOTKEY_NAME}", "info")
@@ -589,7 +590,7 @@ async def main() -> None:
             start_time = time.time()
             try:
                 await generate_samples_continuously(
-                    validator_client, openai_client, get_block,
+                    validator_client, judge_client, get_block,
                 )
                 # generate_samples_continuously is an infinite loop — returning is unexpected.
                 emit_log(
@@ -630,6 +631,23 @@ async def main() -> None:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 300.0)
 
+    async def run_emotion_corpus_manager_supervised() -> None:
+        """Keep the emotional (EARS) corpus topped up, restarting on crash with backoff."""
+        from vocence.pipeline.emotion_corpus import run_emotion_corpus_manager
+        import traceback as _tb
+        backoff = 12.0
+        while True:
+            try:
+                await run_emotion_corpus_manager()
+                return  # loops forever; returning is unexpected
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                emit_log(f"Emotion corpus manager crashed: {e}. Restarting in {backoff:.0f}s...", "error")
+                _tb.print_exc()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300.0)
+
     async def run_registry_supervised() -> None:
         """Keep the local miner registry validating, restarting on crash with backoff."""
         from vocence.registry.local_registry import run_miner_registry
@@ -649,6 +667,7 @@ async def main() -> None:
 
     block_poller_task = asyncio.create_task(run_block_poller_supervised())
     corpus_task = asyncio.create_task(run_corpus_manager_supervised())
+    emotion_corpus_task = asyncio.create_task(run_emotion_corpus_manager_supervised())
     generator_task = asyncio.create_task(run_generator_supervised())
     registry_task = (
         asyncio.create_task(run_registry_supervised()) if USE_LOCAL_REGISTRY else None
@@ -667,6 +686,7 @@ async def main() -> None:
 
     block_poller_task.add_done_callback(handle_supervisor_exception("BlockPoller"))
     corpus_task.add_done_callback(handle_supervisor_exception("Corpus"))
+    emotion_corpus_task.add_done_callback(handle_supervisor_exception("EmotionCorpus"))
     generator_task.add_done_callback(handle_supervisor_exception("Generator"))
     if registry_task is not None:
         registry_task.add_done_callback(handle_supervisor_exception("Registry"))
