@@ -28,6 +28,7 @@ class RevealInfo:
     repo: str
     digest: str
     block: int = 0
+    king_digest: str = ""  # king this challenger targeted (stale-parent check)
 
     @property
     def model_hash(self) -> str:
@@ -48,15 +49,35 @@ def latest_reveals(
         if not parsed:
             continue
         out[uid] = RevealInfo(uid=uid, hotkey=hotkey, repo=parsed["repo"],
-                              digest=parsed["digest"], block=int(block))
+                              digest=parsed["digest"], block=int(block),
+                              king_digest=parsed.get("king_digest", ""))
     return out
 
 
 def candidates_from_reveals(reveals: Dict[int, RevealInfo]) -> List[Candidate]:
     return [
         Candidate(uid=r.uid, hotkey=r.hotkey, repo=r.repo, digest=r.digest,
-                  model_hash=r.model_hash, submission_id=f"{r.uid}:{r.digest[:16]}", block=r.block)
+                  model_hash=r.model_hash, submission_id=f"{r.uid}:{r.digest[:16]}",
+                  block=r.block, parent_king_digest=r.king_digest)
         for r in reveals.values()
+    ]
+
+
+def drop_stale_parents(
+    candidates: List[Candidate], current_king_digest: str
+) -> List[Candidate]:
+    """Drop challengers that declared a target king other than the current one.
+
+    A challenger with no declared parent (legacy / genesis) is kept. After a
+    coronation this drops all in-flight challengers trained against the old king at
+    once, so every validator advances in the same discrete step (teutonic stale-parent).
+    """
+    king = (current_king_digest or "").strip().lower()
+    if not king:
+        return list(candidates)  # no incumbent to match against (genesis)
+    return [
+        c for c in candidates
+        if not c.parent_king_digest or c.parent_king_digest.strip().lower() == king
     ]
 
 

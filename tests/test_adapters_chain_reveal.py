@@ -12,7 +12,7 @@ def test_format_reveal_roundtrip():
     reveal = format_reveal(REPO, GOOD_DIGEST)
     assert reveal == f"v7|{REPO}|{GOOD_DIGEST}"
     parsed = parse_reveal(reveal)
-    assert parsed == {"version": "v7", "repo": REPO, "digest": GOOD_DIGEST}
+    assert parsed == {"version": "v7", "repo": REPO, "digest": GOOD_DIGEST, "king_digest": ""}
 
 
 def test_format_uppercases_digest_normalized():

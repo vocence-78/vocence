@@ -308,11 +308,13 @@ async def commit_reveal_command(
     hotkey: Optional[str] = None,
     chain_network: Optional[str] = None,
     subnet_id: Optional[int] = None,
+    king_digest: str = "",
 ) -> Dict[str, Any]:
-    """Commit a content-addressed v7 reveal (``v7|<repo>|sha256:<digest>``) on chain.
+    """Commit a content-addressed v7 reveal on chain.
 
-    Uses the same ``set_reveal_commitment`` primitive as the legacy commit, but the
-    payload is the immutable reveal string rather than the endpoint JSON.
+    ``v7|<repo>|sha256:<digest>[|<king_digest>]`` — the optional ``king_digest`` is the
+    king the challenger was trained against (stale-parent enforcement). Uses the same
+    ``set_reveal_commitment`` primitive as the legacy commit.
     """
     import bittensor as bt
     from vocence.adapters.chain import format_reveal
@@ -320,7 +322,7 @@ async def commit_reveal_command(
     network = chain_network if chain_network is not None else CHAIN_NETWORK
     netuid = subnet_id if subnet_id is not None else SUBNET_ID
     wallet = bt.Wallet(name=coldkey or COLDKEY_NAME, hotkey=hotkey or HOTKEY_NAME)
-    reveal = format_reveal(repo, digest)  # validates repo/digest, raises on malformed
+    reveal = format_reveal(repo, digest, king_digest)  # validates repo/digest(s), raises on malformed
 
     emit_log(f"Committing reveal: {reveal}", "info")
     emit_log(f"Network: {network}, subnet: {netuid}, hotkey: {wallet.hotkey.ss58_address[:16]}...", "info")

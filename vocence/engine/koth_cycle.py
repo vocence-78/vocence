@@ -36,6 +36,7 @@ class Candidate:
     model_hash: str
     submission_id: str = ""
     block: int = 0
+    parent_king_digest: str = ""  # king this challenger targeted (stale-parent check)
 
 
 def lead_king(reign: Sequence[ReignMember]) -> Optional[ReignMember]:

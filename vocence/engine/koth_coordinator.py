@@ -85,6 +85,12 @@ async def run_cycle(
     reign_uids = [m.uid for m in reign]
 
     candidates = await chain.list_candidates()
+    # Stale-parent: drop challengers that targeted a king other than the current one,
+    # so all validators advance against the same king generation.
+    _king = lead_king(reign)
+    if _king is not None and _king.digest:
+        from vocence.engine.chain_gateway import drop_stale_parents
+        candidates = drop_stale_parents(candidates, _king.digest)
     candidate = select_challenger(candidates, reign)
     if candidate is None:
         from vocence.engine.koth_cycle import current_reign_weights

@@ -423,12 +423,13 @@ def miner_check(path, seed_config):
 @click.option("--namespace", "namespace", default=None, help="Hippius namespace (defaults to $VOCENCE_NAMESPACE).")
 @click.option("--bucket", "bucket", default=None, help="Hippius model bucket (defaults to $VOCENCE_MODEL_BUCKET or 'vocence-models').")
 @click.option("--commit/--no-commit", "do_commit", default=False, help="Also commit the v7 reveal on chain.")
+@click.option("--king-digest", "king_digest", default="", help="Digest of the king this model was trained against (stale-parent).")
 @click.option("--coldkey", default=None)
 @click.option("--hotkey", default=None)
 @click.option("--network", default=None)
 @click.option("--netuid", default=None, type=int)
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt before committing on chain.")
-def miner_publish(path, name, namespace, bucket, do_commit, coldkey, hotkey, network, netuid, yes):
+def miner_publish(path, name, namespace, bucket, do_commit, king_digest, coldkey, hotkey, network, netuid, yes):
     """Validate locally, upload to Hippius, and (optionally) commit the v7 reveal."""
     import os
     import json as _json
@@ -461,14 +462,14 @@ def miner_publish(path, name, namespace, bucket, do_commit, coldkey, hotkey, net
     async def _run():
         client = create_validator_storage_client()
         digest = await upload_model(client, bucket, repo, path)
-        reveal = format_reveal(repo, digest)
+        reveal = format_reveal(repo, digest, king_digest)
         emit_log(f"Uploaded. Reveal: {reveal}", "success")
         if do_commit:
             if not yes and not click.confirm(f"Commit {reveal} on chain?"):
                 emit_log("Commit skipped.", "warn")
                 return
             result = await commit_reveal_command(
-                repo=repo, digest=digest, coldkey=coldkey, hotkey=hotkey,
+                repo=repo, digest=digest, king_digest=king_digest, coldkey=coldkey, hotkey=hotkey,
                 chain_network=network, subnet_id=netuid,
             )
             print(_json.dumps(result, indent=2))

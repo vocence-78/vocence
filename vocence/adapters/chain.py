@@ -64,18 +64,21 @@ def validate_commitment_fields(commit: Dict[str, Any]) -> Tuple[bool, Optional[s
     return True, None
 
 
-def format_reveal(repo: str, digest: str) -> str:
+def format_reveal(repo: str, digest: str, king_digest: str = "") -> str:
     """Build a v7 reveal string binding a repo to an immutable content digest.
 
     Args:
         repo: Model repository, e.g. ``ns/vocence-prompttts-v1``.
         digest: Content digest, ``sha256:<64 hex>``.
+        king_digest: Optional digest of the king this challenger was trained against
+            (stale-parent enforcement). When set, the reveal is
+            ``v7|<repo>|<digest>|<king_digest>``.
 
     Returns:
-        ``v7|<repo>|<digest>`` suitable for ``set_reveal_commitment``.
+        ``v7|<repo>|<digest>[|<king_digest>]`` for ``set_reveal_commitment``.
 
     Raises:
-        ValueError: if repo is empty, contains ``|``, or the digest is malformed.
+        ValueError: if repo is empty, contains ``|``, or a digest is malformed.
     """
     repo = (repo or "").strip()
     digest = (digest or "").strip().lower()
@@ -83,33 +86,33 @@ def format_reveal(repo: str, digest: str) -> str:
         raise ValueError(f"invalid repo for reveal: {repo!r}")
     if not _DIGEST_RE.match(digest):
         raise ValueError(f"invalid digest for reveal (want sha256:<64hex>): {digest!r}")
-    return f"{REVEAL_VERSION}|{repo}|{digest}"
+    king_digest = (king_digest or "").strip().lower()
+    if not king_digest:
+        return f"{REVEAL_VERSION}|{repo}|{digest}"
+    if not _DIGEST_RE.match(king_digest):
+        raise ValueError(f"invalid king_digest for reveal: {king_digest!r}")
+    return f"{REVEAL_VERSION}|{repo}|{digest}|{king_digest}"
 
 
 def parse_reveal(commit_value: str) -> Dict[str, Any]:
     """Parse a v7 reveal commitment.
 
-    Args:
-        commit_value: Raw on-chain commitment value.
-
-    Returns:
-        ``{"version", "repo", "digest"}`` for a well-formed v7 reveal, else ``{}``.
-        Malformed or non-v7 values return ``{}`` (never raises) so callers can treat
-        them as "no valid submission".
+    Returns ``{"version", "repo", "digest", "king_digest"}`` for a well-formed v7
+    reveal (``king_digest`` is ``""`` for the 3-field form), else ``{}``. Malformed or
+    non-v7 values return ``{}`` (never raises) so callers treat them as "no submission".
     """
     if not commit_value or not isinstance(commit_value, str):
         return {}
-    parts = commit_value.strip().split("|")
-    if len(parts) != 3:
+    parts = [p.strip() for p in commit_value.strip().split("|")]
+    if len(parts) not in (3, 4):
         return {}
-    version, repo, digest = (p.strip() for p in parts)
-    if version != REVEAL_VERSION:
+    version, repo, digest = parts[0], parts[1], parts[2].lower()
+    king_digest = parts[3].lower() if len(parts) == 4 else ""
+    if version != REVEAL_VERSION or not repo or not _DIGEST_RE.match(digest):
         return {}
-    repo = repo
-    digest = digest.lower()
-    if not repo or not _DIGEST_RE.match(digest):
+    if king_digest and not _DIGEST_RE.match(king_digest):
         return {}
-    return {"version": version, "repo": repo, "digest": digest}
+    return {"version": version, "repo": repo, "digest": digest, "king_digest": king_digest}
 
 
 def immutable_ref(repo: str, digest: str) -> str:
