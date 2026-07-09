@@ -366,5 +366,117 @@ def miner_commit(model_name, model_revision, chute_id, network, netuid, coldkey,
     asyncio.run(run())
 
 
+@cli.group()
+def miner():
+    """Miner commands: validate a model directory and publish a submission.
+
+    Model-submission flow (no live endpoint, no team-granted key):
+    fine-tune the canonical base -> `vocence miner check` -> `vocence miner publish`
+    (validate -> upload to Hippius -> commit the v7 reveal on chain).
+    """
+
+
+@miner.command("check")
+@click.option("--path", "path", required=True, type=click.Path(exists=True, file_okay=False),
+              help="Local model directory to validate.")
+@click.option("--seed-config", "seed_config", default=None, type=click.Path(exists=True, dir_okay=False),
+              help="Local genesis seed config.json to run the architecture-lock check against.")
+def miner_check(path, seed_config):
+    """Free local dry-run of the manifest + canonical-script (+ optional arch) checks."""
+    import json
+    from vocence.domain.spec import load_spec
+    from vocence.registry.gauntlet import check_file_manifest, check_architecture
+    from vocence.adapters.model_store import build_manifest, file_sha256, compute_dir_digest
+    from vocence.shared.logging import emit_log, print_header
+
+    spec = load_spec()
+    print_header(f"Validating {path}")
+    files = list(build_manifest(path).keys())
+    miner_sha = file_sha256(path, spec.forbidden_py_except or "miner.py")
+
+    outcomes = [check_file_manifest(files, spec, miner_py_sha256=miner_sha)]
+    if seed_config:
+        with open(Path(path) / "config.json") as fh:
+            candidate = json.load(fh)
+        with open(seed_config) as fh:
+            seed = json.load(fh)
+        outcomes.append(check_architecture(candidate, seed, spec))
+    else:
+        emit_log("architecture check skipped (pass --seed-config to enable)", "warn")
+
+    ok = True
+    for o in outcomes:
+        emit_log(f"[{'PASS' if o.ok else 'FAIL'}] {o.name}: {o.reason or 'ok'}",
+                 "success" if o.ok else "error")
+        ok = ok and o.ok
+
+    digest = compute_dir_digest(path)
+    emit_log(f"content digest: {digest}", "info")
+    emit_log("VALID" if ok else "INVALID", "success" if ok else "error")
+    if not ok:
+        raise SystemExit(1)
+
+
+@miner.command("publish")
+@click.option("--path", "path", required=True, type=click.Path(exists=True, file_okay=False))
+@click.option("--name", "name", required=True, help="Repo suffix; full repo becomes <ns>/vocence-prompttts-<name>.")
+@click.option("--namespace", "namespace", default=None, help="Hippius namespace (defaults to $VOCENCE_NAMESPACE).")
+@click.option("--bucket", "bucket", default=None, help="Hippius model bucket (defaults to $VOCENCE_MODEL_BUCKET or 'vocence-models').")
+@click.option("--commit/--no-commit", "do_commit", default=False, help="Also commit the v7 reveal on chain.")
+@click.option("--coldkey", default=None)
+@click.option("--hotkey", default=None)
+@click.option("--network", default=None)
+@click.option("--netuid", default=None, type=int)
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt before committing on chain.")
+def miner_publish(path, name, namespace, bucket, do_commit, coldkey, hotkey, network, netuid, yes):
+    """Validate locally, upload to Hippius, and (optionally) commit the v7 reveal."""
+    import os
+    import json as _json
+    from vocence.domain.spec import load_spec
+    from vocence.registry.gauntlet import check_file_manifest
+    from vocence.adapters.model_store import build_manifest, file_sha256, upload_model
+    from vocence.adapters.storage import create_validator_storage_client
+    from vocence.adapters.chain import format_reveal
+    from vocence.adapters.deployment import commit_reveal_command
+    from vocence.shared.logging import emit_log, print_header
+
+    spec = load_spec()
+    namespace = namespace or os.environ.get("VOCENCE_NAMESPACE")
+    if not namespace:
+        raise click.UsageError("--namespace (or $VOCENCE_NAMESPACE) is required")
+    bucket = bucket or os.environ.get("VOCENCE_MODEL_BUCKET", "vocence-models")
+    # Strip any accidental doubled prefix so `--name vocence-prompttts-v1` also works.
+    suffix = name.removeprefix("vocence-prompttts-")
+    repo = f"{namespace}/vocence-prompttts-{suffix}"
+
+    print_header(f"Publishing {repo}")
+    files = list(build_manifest(path).keys())
+    miner_sha = file_sha256(path, spec.forbidden_py_except or "miner.py")
+    fm = check_file_manifest(files, spec, miner_py_sha256=miner_sha)
+    if not fm.ok:
+        emit_log(f"[FAIL] file_manifest: {fm.reason}", "error")
+        raise SystemExit(1)
+    emit_log("[PASS] local file manifest", "success")
+
+    async def _run():
+        client = create_validator_storage_client()
+        digest = await upload_model(client, bucket, repo, path)
+        reveal = format_reveal(repo, digest)
+        emit_log(f"Uploaded. Reveal: {reveal}", "success")
+        if do_commit:
+            if not yes and not click.confirm(f"Commit {reveal} on chain?"):
+                emit_log("Commit skipped.", "warn")
+                return
+            result = await commit_reveal_command(
+                repo=repo, digest=digest, coldkey=coldkey, hotkey=hotkey,
+                chain_network=network, subnet_id=netuid,
+            )
+            print(_json.dumps(result, indent=2))
+        else:
+            emit_log("Skipped on-chain commit (pass --commit to write it).", "info")
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
     cli()

@@ -301,6 +301,60 @@ async def synthesize(self, args: TTSArgs):
         return {"success": False, "error": str(e)}
 
 
+async def commit_reveal_command(
+    repo: str,
+    digest: str,
+    coldkey: Optional[str] = None,
+    hotkey: Optional[str] = None,
+    chain_network: Optional[str] = None,
+    subnet_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Commit a content-addressed v7 reveal (``v7|<repo>|sha256:<digest>``) on chain.
+
+    Uses the same ``set_reveal_commitment`` primitive as the legacy commit, but the
+    payload is the immutable reveal string rather than the endpoint JSON.
+    """
+    import bittensor as bt
+    from vocence.adapters.chain import format_reveal
+
+    network = chain_network if chain_network is not None else CHAIN_NETWORK
+    netuid = subnet_id if subnet_id is not None else SUBNET_ID
+    wallet = bt.Wallet(name=coldkey or COLDKEY_NAME, hotkey=hotkey or HOTKEY_NAME)
+    reveal = format_reveal(repo, digest)  # validates repo/digest, raises on malformed
+
+    emit_log(f"Committing reveal: {reveal}", "info")
+    emit_log(f"Network: {network}, subnet: {netuid}, hotkey: {wallet.hotkey.ss58_address[:16]}...", "info")
+
+    async def _commit() -> bool:
+        subtensor = bt.AsyncSubtensor(network=network)
+        for attempt in range(3):
+            try:
+                await subtensor.set_reveal_commitment(
+                    wallet=wallet, netuid=netuid, data=reveal, blocks_until_reveal=1
+                )
+                return True
+            except Exception as e:  # noqa: BLE001
+                if "SpaceLimitExceeded" in str(e):
+                    emit_log("Space limit exceeded, waiting for next block...", "warn")
+                    await asyncio.sleep(12)
+                elif attempt < 2:
+                    emit_log(f"Commit attempt {attempt + 1} failed: {e}", "warn")
+                    await asyncio.sleep(6)
+                else:
+                    raise
+        return False
+
+    try:
+        success = await _commit()
+        result = {"success": success, "repo": repo, "digest": digest, "reveal": reveal}
+        emit_log("Reveal commit successful" if success else "Reveal commit failed",
+                 "success" if success else "error")
+        return result
+    except Exception as e:  # noqa: BLE001
+        emit_log(f"Reveal commit failed: {e}", "error")
+        return {"success": False, "error": str(e), "repo": repo, "digest": digest}
+
+
 async def commit_command(
     model_name: str,
     model_revision: str,
