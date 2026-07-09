@@ -1,0 +1,85 @@
+# Vocence subnet constants — the single source of truth for submission + evaluation
+# rules. Public and versioned so a miner can reproduce every check locally before
+# committing on chain. Loaded by vocence.domain.spec.load_spec().
+
+[chain]
+name = "Vocence"
+netuid = 78
+# Canonical PromptTTS base: miners fine-tune this Qwen3 1.7B 12Hz voice-design model.
+# Only the weights change; the architecture and tokenizer are locked.
+seed_repo = "concil859856/qwen3-voicedesign-base"
+seed_revision = "9f2d4c9f23e66f6700b7ca1420d5a8acb7662e7f"
+# Challenger repos must match this pattern under any namespace.
+repo_pattern = "^[^/]+/vocence-prompttts-.+$"
+
+[arch]
+# config.json identity + capacity keys a challenger's config must match the seed on.
+lock_keys = [
+  "model_type",
+  "hidden_size",
+  "num_hidden_layers",
+  "num_attention_heads",
+  "num_key_value_heads",
+  "intermediate_size",
+  "vocab_size",
+  "max_position_embeddings",
+  "tie_word_embeddings",
+  "rope_theta",
+  "head_dim",
+]
+
+[seed]
+# Genesis reference weights hash; also the model_hash any exact-base clone maps to.
+seed_weights_hash = "bdd08e0d48fef836a5a941eb2ab666ebc85be056566376fc672c584c0346b125"
+
+[files]
+# Strict allowlist — mirrors REPO_FILE_MANIFEST / REPO_REQUIRED_FILES in domain.config.
+required = [
+  "config.json",
+  "generation_config.json",
+  "merges.txt",
+  "miner.py",
+  "model.safetensors",
+  "preprocessor_config.json",
+  "tokenizer_config.json",
+  "vocab.json",
+  "vocence_config.yaml",
+  "chute_config.yml",
+  "speech_tokenizer/model.safetensors",
+  "speech_tokenizer/config.json",
+  "speech_tokenizer/configuration.json",
+  "speech_tokenizer/preprocessor_config.json",
+]
+allowed = [".gitattributes", ".gitignore", "README.md"]
+require_safetensors = true
+# All *.py are forbidden EXCEPT the single canonical inference script, which must
+# match this hash byte-for-byte. Prevents alternative models / custom pre/post-processing.
+forbidden_py_except = "miner.py"
+canonical_miner_py_sha256 = "4e57d5ee0151681931d6601503fc8e1d21b9d2f22b2e359778727b14ee6ea212"
+
+[preeval]
+# Near-duplicate flag fires at/above this fingerprint similarity.
+similarity_threshold = 0.95
+
+[incentive]
+# Top-5 equal-split king-of-the-hill court (see whitepaper §7).
+win_margin = 0.03      # composite gap a challenger must exceed to crown
+court_size = 5         # max simultaneous kings sharing emissions
+burn_uid = 0           # receives weight when the court is empty
+
+[eval]
+corpus_min_samples = 128
+# Intelligibility is a hard gate as well as a scored facet.
+intelligibility_max_wer = 0.15
+adherence_questions_per_sample = 50
+# Facet weights for the composite score (must sum to 1.0).
+[eval.facet_weights]
+intelligibility = 0.20
+adherence = 0.45
+naturalness = 0.35
+
+[eval.judges]
+# Pinned open, self-hostable judge models — no external/centralized API.
+intelligibility = "openai/whisper-large-v3"
+adherence = "moonshotai/Kimi-Audio-7B-Instruct"
+naturalness = "AmphionTeam/SpeechJudge-GRM"
