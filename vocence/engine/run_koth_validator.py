@@ -79,6 +79,7 @@ async def run_forever(  # pragma: no cover - live loop (needs chain + GPU)
     cycle_length: int = 150,
     offset: int = 0,
     on_report=None,
+    genesis_reign=(),
 ):
     """Poll the chain; run one KOTH cycle per weight-set window; emit reports.
 
@@ -95,7 +96,7 @@ async def run_forever(  # pragma: no cover - live loop (needs chain + GPU)
             if window != last_ran_window and should_run_cycle(block, cycle_length, offset):
                 report = await run_cycle(
                     chain=chain, validate=validate, make_generator=make_generator,
-                    judges=judges, corpus=corpus, spec=spec,
+                    judges=judges, corpus=corpus, spec=spec, genesis_reign=genesis_reign,
                 )
                 last_ran_window = window
                 if on_report is not None:

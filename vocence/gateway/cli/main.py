@@ -547,6 +547,9 @@ def serve_koth(corpus_path, seed_config, model_bucket, dashboard_bucket, votes):
     corpus = load_corpus_file(corpus_path)
     emit_log(f"Loaded {len(corpus)} corpus samples (min {spec.corpus_min_samples})", "info")
 
+    from vocence.engine.genesis import genesis_reign as _genesis_reign
+    genesis = _genesis_reign(spec, owner_uid=cfg.OWNER_UID, owner_hotkey=cfg.OWNER_HOTKEY)
+
     wallet = bt.Wallet(name=cfg.COLDKEY_NAME, hotkey=cfg.HOTKEY_NAME)
     gateway = BittensorChainGateway(wallet, network=cfg.CHAIN_NETWORK, netuid=spec.netuid, spec=spec)
     store = FingerprintStore()
@@ -577,6 +580,7 @@ def serve_koth(corpus_path, seed_config, model_bucket, dashboard_bucket, votes):
     asyncio.run(run_forever(
         chain=gateway, validate=validate, make_generator=make_gen, judges=judges,
         corpus=corpus, spec=spec, cycle_length=cfg.CYCLE_LENGTH, on_report=on_report,
+        genesis_reign=genesis,
     ))
 
 

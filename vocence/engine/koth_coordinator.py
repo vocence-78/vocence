@@ -72,10 +72,13 @@ async def run_cycle(
     judges: Judges,
     corpus: Sequence[CorpusSample],
     spec: SubnetSpec,
-    weights_uids_setter_ok: bool = True,
+    genesis_reign: Sequence[ReignMember] = (),
 ) -> CycleReport:
     block = await chain.current_block()
     reign = await chain.resolve_reign()
+    if not reign and genesis_reign:
+        # Seed the empty hill with the base model so challengers must beat it.
+        reign = list(genesis_reign)
     reign_uids = [m.uid for m in reign]
 
     candidates = await chain.list_candidates()
