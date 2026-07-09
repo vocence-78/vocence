@@ -42,6 +42,8 @@ def cycle_report_to_run(report: CycleReport) -> Dict[str, Any]:
     run: Dict[str, Any] = {
         "block": report.block,
         "challenger_uid": report.challenger_uid,
+        "challenger_hotkey": report.challenger_hotkey,
+        "challenger_repo": report.challenger_repo,
         "king_uid": report.reign_uids[0] if report.reign_uids else None,
         "coronated": report.coronated,
         "note": report.note,
@@ -74,24 +76,84 @@ def queue_to_json(candidates: Sequence[Candidate]) -> List[Dict[str, Any]]:
     ]
 
 
+def build_leaderboard(
+    reign: Sequence[ReignMember], runs: Sequence[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Rank participants: current kings first (by slot), then challengers by best composite.
+
+    Aggregates each challenger's history from the runs feed (best composite achieved,
+    duels attempted, coronations, last block). Built from ``runs`` (serialized) so it
+    survives restarts via the persisted report store.
+    """
+    king_by_uid = {m.uid: m for m in reign}
+    bps = weight_bps_for_member_count(len(reign))
+    weight_by_uid = {m.uid: (bps[i] / 10000 if bps else 0.0)
+                     for i, m in enumerate(sorted(reign, key=lambda x: x.slot or 99))}
+
+    agg: Dict[int, Dict[str, Any]] = {}
+    for run in runs:
+        uid = run.get("challenger_uid")
+        if uid is None:
+            continue
+        e = agg.setdefault(uid, {"uid": uid, "hotkey": run.get("challenger_hotkey", ""),
+                                 "repo": run.get("challenger_repo", ""), "best_composite": None,
+                                 "duels": 0, "coronations": 0, "last_block": 0})
+        e["duels"] += 1
+        if run.get("coronated"):
+            e["coronations"] += 1
+        comp = run.get("composite_challenger")
+        if comp is not None and (e["best_composite"] is None or comp > e["best_composite"]):
+            e["best_composite"] = comp
+        e["last_block"] = max(e["last_block"], run.get("block", 0) or 0)
+        if run.get("challenger_hotkey"):
+            e["hotkey"] = run["challenger_hotkey"]
+
+    board: List[Dict[str, Any]] = []
+    for m in sorted(reign, key=lambda x: x.slot or 99):
+        hist = agg.get(m.uid, {})
+        board.append({
+            "uid": m.uid, "hotkey": m.hotkey, "repo": m.repo,
+            "status": "king", "slot": m.slot, "weight": round(weight_by_uid.get(m.uid, 0.0), 6),
+            "best_composite": hist.get("best_composite"),
+            "coronations": hist.get("coronations", 0), "duels": hist.get("duels", 0),
+        })
+    challengers = [e for uid, e in agg.items() if uid not in king_by_uid]
+    challengers.sort(key=lambda e: (e["best_composite"] is None, -(e["best_composite"] or 0)))
+    for e in challengers:
+        board.append({
+            "uid": e["uid"], "hotkey": e["hotkey"], "repo": e["repo"],
+            "status": "challenger", "slot": None, "weight": 0.0,
+            "best_composite": e["best_composite"], "coronations": e["coronations"], "duels": e["duels"],
+        })
+    for rank, entry in enumerate(board, 1):
+        entry["rank"] = rank
+    return board
+
+
 def build_dashboard(
     *,
     spec: SubnetSpec,
     block: int,
     reign: Sequence[ReignMember],
-    reports: Sequence[CycleReport],
+    reports: Sequence[CycleReport] = (),
+    runs: Optional[Sequence[Dict[str, Any]]] = None,
     queue: Sequence[Candidate] = (),
     stats: Optional[Dict[str, Any]] = None,
     updated_at: str = "",
     max_runs: int = 100,
 ) -> Dict[str, Any]:
-    runs = [cycle_report_to_run(r) for r in reports if r.duel is not None][-max_runs:]
-    coronations = sum(1 for r in reports if r.coronated)
+    # Prefer pre-serialized runs (from the persistent store); else convert reports.
+    if runs is None:
+        runs = [cycle_report_to_run(r) for r in reports if r.duel is not None]
+    runs = list(runs)[-max_runs:]
+    coronations = sum(1 for r in runs if r.get("coronated"))
+    leaderboard = build_leaderboard(reign, runs)
     computed_stats = {
-        "eval_runs": len([r for r in reports if r.duel is not None]),
+        "eval_runs": len(runs),
         "coronations": coronations,
         "court_size": len(reign),
         "queue_depth": len(queue),
+        "participants": len(leaderboard),
     }
     if stats:
         computed_stats.update(stats)
@@ -108,6 +170,7 @@ def build_dashboard(
         },
         "chain": {"block": block},
         "reign": reign_to_json(reign),
+        "leaderboard": leaderboard,
         "current_eval": None,
         "queue": queue_to_json(queue),
         "eval_runs": list(reversed(runs)),  # newest first

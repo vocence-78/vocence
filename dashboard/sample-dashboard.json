@@ -41,18 +41,80 @@
       "weight": 0.3333
     }
   ],
+  "leaderboard": [
+    {
+      "uid": 225,
+      "hotkey": "5CJ2o8dxUrp7K5rhAXMsHHh7xt6rVEsmSwQQrf7xncHb7SoQ",
+      "repo": "everking/vocence-prompttts-topk",
+      "status": "king",
+      "slot": 1,
+      "weight": 0.3334,
+      "best_composite": 0.781,
+      "coronations": 1,
+      "duels": 1,
+      "rank": 1
+    },
+    {
+      "uid": 112,
+      "hotkey": "5Fk765B4CRBekwErwE5VxvveWhHztHSfsnsLt8cbDayDWsuk",
+      "repo": "rho/vocence-prompttts-v7",
+      "status": "king",
+      "slot": 2,
+      "weight": 0.3333,
+      "best_composite": null,
+      "coronations": 0,
+      "duels": 0,
+      "rank": 2
+    },
+    {
+      "uid": 48,
+      "hotkey": "5Dvv8aB4CRBekwErwE5VxvveWhHztHSfsnsLt8cbDayDabcd",
+      "repo": "mira/vocence-prompttts-emo",
+      "status": "king",
+      "slot": 3,
+      "weight": 0.3333,
+      "best_composite": null,
+      "coronations": 0,
+      "duels": 0,
+      "rank": 3
+    },
+    {
+      "uid": 231,
+      "hotkey": "5GxChal9",
+      "repo": "ns/5GxChal9",
+      "status": "challenger",
+      "slot": null,
+      "weight": 0.0,
+      "best_composite": 0.7365,
+      "coronations": 0,
+      "duels": 1,
+      "rank": 4
+    },
+    {
+      "uid": 88,
+      "hotkey": "5Hy88zz",
+      "repo": "ns/5Hy88zz",
+      "status": "challenger",
+      "slot": null,
+      "weight": 0.0,
+      "best_composite": 0.68,
+      "coronations": 0,
+      "duels": 1,
+      "rank": 5
+    }
+  ],
   "current_eval": null,
   "queue": [
     {
       "uid": 301,
-      "hotkey": "5Gx\u2026",
+      "hotkey": "5Gx1",
       "repo": "newminer/vocence-prompttts-a",
       "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
       "block": 841500
     },
     {
       "uid": 302,
-      "hotkey": "5Hy\u2026",
+      "hotkey": "5Hy2",
       "repo": "labz/vocence-prompttts-fast",
       "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
       "block": 841540
@@ -62,11 +124,12 @@
     {
       "block": 840800,
       "challenger_uid": 88,
+      "challenger_hotkey": "5Hy88zz",
+      "challenger_repo": "ns/5Hy88zz",
       "king_uid": 225,
       "coronated": false,
       "note": "intelligibility_gate_failed",
       "weights_uids": [
-        88,
         225,
         112,
         48
@@ -100,11 +163,12 @@
     {
       "block": 841020,
       "challenger_uid": 231,
+      "challenger_hotkey": "5GxChal9",
+      "challenger_repo": "ns/5GxChal9",
       "king_uid": 225,
       "coronated": false,
       "note": "",
       "weights_uids": [
-        231,
         225,
         112,
         48
@@ -138,7 +202,9 @@
     {
       "block": 841200,
       "challenger_uid": 225,
-      "king_uid": 199,
+      "challenger_hotkey": "5CJ2o8dx",
+      "challenger_repo": "ns/5CJ2o8dx",
+      "king_uid": 225,
       "coronated": true,
       "note": "",
       "weights_uids": [
@@ -179,6 +245,7 @@
     "coronations": 1,
     "court_size": 3,
     "queue_depth": 2,
+    "participants": 5,
     "registered_miners": 107,
     "valid_models": 41
   },

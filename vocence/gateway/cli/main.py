@@ -536,6 +536,7 @@ def serve_koth(corpus_path, seed_config, model_bucket, dashboard_bucket, votes):
     )
     from vocence.gateway.dashboard.model import build_dashboard
     from vocence.gateway.dashboard.publish import publish_dashboard
+    from vocence.gateway.dashboard.store import ReportStore
     from vocence.shared.logging import emit_log, print_header
 
     spec = load_spec()
@@ -559,14 +560,14 @@ def serve_koth(corpus_path, seed_config, model_bucket, dashboard_bucket, votes):
     validate = make_validator(spec, seed_cfg, fetch_model, store)
     make_gen = make_generator_factory(spec, fetch_model, cache)
     judges = build_judges(spec, votes=votes)
-    reports = []
+    report_store = ReportStore(os.path.join(os.getcwd(), "data", "koth_reports.jsonl"))
 
     async def on_report(report):
-        reports.append(report)
+        report_store.append(report)  # persists (survives restarts); drives the leaderboard
         try:
             reign = await gateway.resolve_reign()
             data = build_dashboard(
-                spec=spec, block=report.block, reign=reign, reports=reports,
+                spec=spec, block=report.block, reign=reign, runs=report_store.recent(200),
                 updated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             )
             await publish_dashboard(storage, dashboard_bucket, data)

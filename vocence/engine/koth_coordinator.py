@@ -60,6 +60,8 @@ class CycleReport:
     weights: List[float]
     duel: Optional[DuelResult] = None
     note: str = ""
+    challenger_hotkey: str = ""
+    challenger_repo: str = ""
 
 
 async def run_cycle(
@@ -90,7 +92,8 @@ async def run_cycle(
         uids, weights = current_reign_weights(reign, spec)
         await chain.set_weights(uids, weights)
         return CycleReport(block, reign_uids, candidate.uid, False, uids, weights,
-                           note=f"invalid_challenger:{reason}")
+                           note=f"invalid_challenger:{reason}",
+                           challenger_hotkey=candidate.hotkey, challenger_repo=candidate.repo)
 
     challenger = challenger_from_candidate(candidate)
     king = lead_king(reign)
@@ -110,4 +113,5 @@ async def run_cycle(
 
     uids, weights, coronated = plan_after_duel(reign, challenger, result, spec)
     await chain.set_weights(uids, weights)
-    return CycleReport(block, reign_uids, candidate.uid, coronated, uids, weights, duel=result)
+    return CycleReport(block, reign_uids, candidate.uid, coronated, uids, weights, duel=result,
+                       challenger_hotkey=candidate.hotkey, challenger_repo=candidate.repo)

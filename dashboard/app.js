@@ -62,6 +62,27 @@ function facetCell(f) {
     <div class="bar"><i class="c" style="width:${c}%"></i></div>${c}%</div></td>`;
 }
 
+function renderLeaderboard(d) {
+  const body = $("#leaderboard tbody"); body.innerHTML = "";
+  const rows = d.leaderboard || [];
+  if (!rows.length) { body.append(el("tr", null, `<td colspan="8" class="empty">No participants yet.</td>`)); return; }
+  for (const e of rows) {
+    const status = e.status === "king"
+      ? `<span class="badge win">👑 slot ${e.slot}</span>`
+      : `<span class="badge">challenger</span>`;
+    const best = e.best_composite != null ? e.best_composite.toFixed(3) : "—";
+    body.append(el("tr", null,
+      `<td class="mono">${e.rank}</td>
+       <td class="mono">${e.uid}</td>
+       <td class="mono" title="${e.hotkey || ""}">${shortHk(e.hotkey)}</td>
+       <td>${status}</td>
+       <td class="mono">${e.status === "king" ? pct(e.weight) : "—"}</td>
+       <td class="mono">${best}</td>
+       <td class="mono">${e.coronations ?? 0}</td>
+       <td class="mono">${e.duels ?? 0}</td>`));
+  }
+}
+
 function renderDuels(d) {
   const body = $("#duels tbody"); body.innerHTML = "";
   const runs = d.eval_runs || [];
@@ -104,7 +125,7 @@ function render(d) {
   $("#subtitle").textContent = (d.spec?.name || "Vocence") + " · netuid " + (d.spec?.netuid ?? "—");
   $("#block").textContent = "block " + (d.chain?.block ?? "—");
   $("#updated").textContent = "updated " + (d.updated_at ? d.updated_at.replace("T", " ").replace("Z", " UTC") : "—");
-  renderStats(d); renderReign(d); renderDuels(d); renderQueue(d);
+  renderStats(d); renderReign(d); renderLeaderboard(d); renderDuels(d); renderQueue(d);
 }
 
 async function tick() { render(await fetchDashboard()); }
