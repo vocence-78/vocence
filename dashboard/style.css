@@ -63,6 +63,25 @@ td.mono, .mono { font-family: var(--mono); }
 .badge.win { background: color-mix(in srgb, var(--win) 20%, transparent); color: var(--win); }
 .badge.lose { background: color-mix(in srgb, var(--lose) 18%, transparent); color: var(--lose); }
 
+/* Duel drill-down */
+tr.duel { cursor: pointer; }
+tr.duel:hover { background: var(--panel2); }
+tr.duel .chev { display: inline-block; width: 12px; color: var(--mute); transition: transform .15s; }
+tr.duel.open .chev { transform: rotate(90deg); }
+.detail td { background: var(--panel2); }
+.detailgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; padding: 6px 2px 10px; }
+.fbox { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.fbox h4 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; color: var(--mute); }
+.vs { display: flex; flex-direction: column; gap: 7px; }
+.vsrow { display: grid; grid-template-columns: 74px 1fr 46px; align-items: center; gap: 8px; font-size: 12px; }
+.vsbar { height: 8px; background: var(--chip); border-radius: 4px; overflow: hidden; }
+.vsbar > i { display: block; height: 100%; }
+.vsbar > i.king { background: var(--mute); }
+.vsbar > i.chal { background: var(--acc); }
+.winrate { font-family: var(--mono); font-size: 11px; color: var(--mute); margin-top: 6px; }
+.meta-line { font-size: 12px; color: var(--mute); padding: 0 2px 4px; }
+.meta-line b { color: var(--ink); font-family: var(--mono); }
+
 .queue { display: flex; flex-direction: column; gap: 8px; }
 .qrow { display: flex; justify-content: space-between; gap: 10px; background: var(--panel2);
   border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font-size: 13px; }

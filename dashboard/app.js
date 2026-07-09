@@ -83,10 +83,33 @@ function renderLeaderboard(d) {
   }
 }
 
+function vsRow(f) {
+  const k = Math.round((f?.king || 0) * 100), c = Math.round((f?.challenger || 0) * 100);
+  return `<div class="vs">
+    <div class="vsrow"><span class="muted">king</span><div class="vsbar"><i class="king" style="width:${k}%"></i></div><span class="mono">${k}%</span></div>
+    <div class="vsrow"><span>chal.</span><div class="vsbar"><i class="chal" style="width:${c}%"></i></div><span class="mono">${c}%</span></div>
+    <div class="winrate">challenger win-rate ${pct(f?.challenger_win_rate)}</div></div>`;
+}
+
+function detailPanel(r) {
+  const f = r.facets || {};
+  const names = {
+    intelligibility: "Intelligibility · Whisper",
+    adherence: "Prompt-adherence · audio-LLM",
+    naturalness: "Naturalness · SpeechJudge-GRM",
+  };
+  const boxes = Object.keys(names).map(k => `<div class="fbox"><h4>${names[k]}</h4>${vsRow(f[k])}</div>`).join("");
+  const verdict = r.challenger_won ? "challenger crowned" : (r.note || "king held");
+  return `<div class="detailgrid">${boxes}</div>
+    <div class="meta-line">composite <b>${(r.composite_challenger ?? 0).toFixed(3)}</b> vs king <b>${(r.composite_king ?? 0).toFixed(3)}</b>
+    · margin needed <b>${pct(r.win_margin)}</b> · scored <b>${r.scored_samples}/${r.total_samples}</b>
+    · gate pass <b>${pct(r.gate_pass_rate)}</b> · verdict <b>${verdict}</b></div>`;
+}
+
 function renderDuels(d) {
   const body = $("#duels tbody"); body.innerHTML = "";
   const runs = d.eval_runs || [];
-  if (!runs.length) { body.append(el("tr", null, `<td colspan="8" class="empty">No duels yet.</td>`)); return; }
+  if (!runs.length) { body.append(el("tr", null, `<td colspan="9" class="empty">No duels yet.</td>`)); return; }
   for (const r of runs) {
     const won = r.challenger_won;
     const comp = r.composite_challenger != null
@@ -95,8 +118,9 @@ function renderDuels(d) {
     const badge = r.state === "failed"
       ? `<span class="badge lose">failed</span>`
       : (won ? `<span class="badge win">CROWNED</span>` : `<span class="badge lose">held</span>`);
-    const tr = el("tr", null,
-      `<td class="mono">${r.block ?? "—"}</td>
+    const tr = el("tr", "duel",
+      `<td class="mono"><span class="chev">▸</span></td>
+       <td class="mono">${r.block ?? "—"}</td>
        <td class="mono">uid ${r.challenger_uid ?? "—"}</td>
        <td class="mono">uid ${r.king_uid ?? "—"}</td>
        <td class="mono">${comp}</td>
@@ -104,7 +128,14 @@ function renderDuels(d) {
        ${facetCell(r.facets?.adherence)}
        ${facetCell(r.facets?.naturalness)}
        <td>${badge}</td>`);
-    body.append(tr);
+    const detail = el("tr", "detail", `<td colspan="9">${detailPanel(r)}</td>`);
+    detail.style.display = "none";
+    tr.addEventListener("click", () => {
+      const open = detail.style.display !== "none";
+      detail.style.display = open ? "none" : "table-row";
+      tr.classList.toggle("open", !open);
+    });
+    body.append(tr, detail);
   }
 }
 
