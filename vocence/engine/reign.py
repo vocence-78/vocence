@@ -24,6 +24,8 @@ class ChainEntry:
     hotkey: str
     model_hash: str
     incentive: float
+    repo: str = ""
+    digest: str = ""
 
 
 def resolve_reign(entries: Sequence[ChainEntry], spec: SubnetSpec) -> List[ReignMember]:
@@ -36,25 +38,36 @@ def resolve_reign(entries: Sequence[ChainEntry], spec: SubnetSpec) -> List[Reign
         key=lambda e: (-e.incentive, e.uid),
     )[: spec.court_size]
     return [
-        ReignMember(uid=e.uid, hotkey=e.hotkey, model_hash=e.model_hash, slot=i + 1)
+        ReignMember(uid=e.uid, hotkey=e.hotkey, model_hash=e.model_hash, slot=i + 1,
+                    repo=e.repo, digest=e.digest)
         for i, e in enumerate(ranked)
     ]
 
 
+@dataclass(frozen=True)
+class UidModel:
+    """A UID's currently-committed model (from its v7 reveal)."""
+
+    hotkey: str
+    model_hash: str
+    repo: str = ""
+    digest: str = ""
+
+
 def reign_from_chain(
     incentive_by_uid: Dict[int, float],
-    model_by_uid: Dict[int, "tuple[str, str]"],
+    model_by_uid: Dict[int, UidModel],
     spec: SubnetSpec,
 ) -> List[ReignMember]:
     """Build the reign from metagraph incentive + committed models.
 
     Args:
         incentive_by_uid: uid -> incentive (from ``metagraph.I``).
-        model_by_uid: uid -> (hotkey, model_hash) from that uid's current reveal.
+        model_by_uid: uid -> :class:`UidModel` from that uid's current reveal.
     """
     entries = [
-        ChainEntry(uid=uid, hotkey=model_by_uid[uid][0], model_hash=model_by_uid[uid][1],
-                   incentive=float(inc))
+        ChainEntry(uid=uid, hotkey=model_by_uid[uid].hotkey, model_hash=model_by_uid[uid].model_hash,
+                   incentive=float(inc), repo=model_by_uid[uid].repo, digest=model_by_uid[uid].digest)
         for uid, inc in incentive_by_uid.items()
         if uid in model_by_uid
     ]

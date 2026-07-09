@@ -29,6 +29,8 @@ class ReignMember:
     model_hash: str
     submission_id: str = ""
     slot: int = 0  # 1-based position in the current reign (0 = not yet placed)
+    repo: str = ""    # content-addressed model location (for regenerating king audio)
+    digest: str = ""
 
 
 @dataclass(frozen=True)

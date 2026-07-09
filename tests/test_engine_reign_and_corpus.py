@@ -4,7 +4,7 @@ import json
 import pytest
 
 from vocence.domain.spec import load_spec
-from vocence.engine.reign import ChainEntry, resolve_reign, reign_from_chain
+from vocence.engine.reign import ChainEntry, resolve_reign, reign_from_chain, UidModel
 from vocence.pipeline.eval_corpus import parse_corpus, corpus_hash
 
 SPEC = load_spec()
@@ -27,7 +27,7 @@ def test_resolve_reign_drops_zero_incentive():
 def test_reign_from_chain_joins_incentive_and_models():
     reign = reign_from_chain(
         incentive_by_uid={1: 0.9, 2: 0.1, 3: 0.0},
-        model_by_uid={1: ("hkA", "mA"), 2: ("hkB", "mB")},
+        model_by_uid={1: UidModel("hkA", "mA"), 2: UidModel("hkB", "mB")},
         spec=SPEC,
     )
     assert [m.uid for m in reign] == [1, 2]
