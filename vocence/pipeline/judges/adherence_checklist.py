@@ -37,15 +37,17 @@ class AdherenceChecklistJudge:
     def questions_for(self, traits: Dict[str, object]) -> List[Dict[str, str]]:
         return build_trait_questions(traits, self.spec.adherence_questions_per_sample)
 
+    def score_side(self, traits: Dict[str, object], audio: bytes) -> float:
+        """Adherence score in [0,1] for one output (mean ternary answer over the checklist)."""
+        questions = self.questions_for(traits)
+        return aggregate_ternary(self._ensure()(audio, questions))
+
     def score_pair(
         self, traits: Dict[str, object], king_audio: bytes, challenger_audio: bytes
     ) -> FacetPair:
         """Answer the identical question set for both sides (paired comparison)."""
-        questions = self.questions_for(traits)
-        answer = self._ensure()
-        king = aggregate_ternary(answer(king_audio, questions))
-        challenger = aggregate_ternary(answer(challenger_audio, questions))
-        return FacetPair(king=king, challenger=challenger)
+        return FacetPair(king=self.score_side(traits, king_audio),
+                         challenger=self.score_side(traits, challenger_audio))
 
 
 def _load_audio_llm(model_id: str) -> Answerer:  # pragma: no cover - GPU path
