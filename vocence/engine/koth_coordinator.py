@@ -62,6 +62,8 @@ class CycleReport:
     note: str = ""
     challenger_hotkey: str = ""
     challenger_repo: str = ""
+    run_id: str = ""
+    records: list = field(default_factory=list)  # per-sample SampleRecords (in-memory; for run-detail publishing)
 
 
 async def run_cycle(
@@ -73,6 +75,7 @@ async def run_cycle(
     corpus: Sequence[CorpusSample],
     spec: SubnetSpec,
     genesis_reign: Sequence[ReignMember] = (),
+    duel_runner=None,
 ) -> CycleReport:
     block = await chain.current_block()
     reign = await chain.resolve_reign()
@@ -100,6 +103,8 @@ async def run_cycle(
 
     challenger = challenger_from_candidate(candidate)
     king = lead_king(reign)
+    run_id = f"{block}-{candidate.uid}"
+    records: list = []
 
     if king is None:
         # Genesis: no incumbent to duel; the first valid challenger takes the hill.
@@ -108,13 +113,19 @@ async def run_cycle(
     else:
         king_gen = await make_generator(king.repo, king.digest)
         chal_gen = await make_generator(candidate.repo, candidate.digest)
-        result = run_duel(
-            corpus, king_gen, chal_gen,
-            intelligibility=judges.intelligibility, adherence=judges.adherence,
-            naturalness=judges.naturalness, spec=spec,
-        )
+        if duel_runner is not None:
+            # King-caching runner: king audio + king-side facets reused across challengers.
+            result = duel_runner.run(corpus, king_gen, king.digest, chal_gen)
+            records = list(duel_runner.last_records)
+        else:
+            result = run_duel(
+                corpus, king_gen, chal_gen,
+                intelligibility=judges.intelligibility, adherence=judges.adherence,
+                naturalness=judges.naturalness, spec=spec,
+            )
 
     uids, weights, coronated = plan_after_duel(reign, challenger, result, spec)
     await chain.set_weights(uids, weights)
     return CycleReport(block, reign_uids, candidate.uid, coronated, uids, weights, duel=result,
-                       challenger_hotkey=candidate.hotkey, challenger_repo=candidate.repo)
+                       challenger_hotkey=candidate.hotkey, challenger_repo=candidate.repo,
+                       run_id=run_id, records=records)

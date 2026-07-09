@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vocence · Duel Detail</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <a href="index.html" class="logo" style="text-decoration:none">◉</a>
+      <div>
+        <h1>DUEL DETAIL</h1>
+        <p id="subtitle"><a href="index.html" style="color:inherit">← back to dashboard</a></p>
+      </div>
+    </div>
+    <div class="meta">
+      <span id="runid" class="pill">run —</span>
+      <button id="theme" class="pill" title="Toggle theme">◐</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="summary" class="cards" aria-label="Run summary"></section>
+
+    <section class="panel">
+      <h2>Per-sample scores</h2>
+      <p class="hint">Every corpus sample scored for this duel — prompt, requested traits, and
+        king-vs-challenger scores per facet. Challenger cells are shaded when they beat the king.</p>
+      <div class="table-wrap">
+        <table id="samples">
+          <thead>
+            <tr>
+              <th>Sample</th><th>Text</th><th>Traits</th>
+              <th>Intel. (K/C)</th><th>Adher. (K/C)</th><th>Natural. (K/C)</th><th>Gate</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer><span id="foot">Per-run detail published to Hippius at data/runs/&lt;run_id&gt;.json</span></footer>
+
+  <script type="module" src="detail.js"></script>
+</body>
+</html>

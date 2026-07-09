@@ -40,6 +40,7 @@ def reign_to_json(reign: Sequence[ReignMember]) -> List[Dict[str, Any]]:
 def cycle_report_to_run(report: CycleReport) -> Dict[str, Any]:
     """One recent-duel record for the dashboard's eval-runs feed."""
     run: Dict[str, Any] = {
+        "run_id": report.run_id,
         "block": report.block,
         "challenger_uid": report.challenger_uid,
         "challenger_hotkey": report.challenger_hotkey,
@@ -67,6 +68,39 @@ def cycle_report_to_run(report: CycleReport) -> Dict[str, Any]:
             },
         })
     return run
+
+
+def build_run_detail(
+    report: CycleReport, corpus: Sequence[Any] = ()
+) -> Dict[str, Any]:
+    """Full per-run detail (published to data/runs/<run_id>.json) for the detail page.
+
+    Includes the aggregate verdict plus a per-sample table: prompt + traits joined from
+    the corpus, and king-vs-challenger scores for each facet. This is the albedo-style
+    drill-down — every duel becomes an addressable, inspectable record.
+    """
+    by_id = {getattr(s, "sample_id", None): s for s in corpus}
+    samples: List[Dict[str, Any]] = []
+    for rec in report.records:
+        src = by_id.get(rec.sample_id)
+        samples.append({
+            "sample_id": rec.sample_id,
+            "target_text": getattr(src, "target_text", "") if src else "",
+            "traits": getattr(src, "traits", {}) if src else {},
+            "scored": rec.scored,
+            "king_intelligible": rec.king_intelligible,
+            "challenger_intelligible": rec.challenger_intelligible,
+            "facets": {
+                "intelligibility": {"king": rec.intelligibility.king, "challenger": rec.intelligibility.challenger},
+                "adherence": {"king": rec.adherence.king, "challenger": rec.adherence.challenger},
+                "naturalness": {"king": rec.naturalness.king, "challenger": rec.naturalness.challenger},
+            },
+        })
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "run": cycle_report_to_run(report),
+        "samples": samples,
+    }
 
 
 def queue_to_json(candidates: Sequence[Candidate]) -> List[Dict[str, Any]]:

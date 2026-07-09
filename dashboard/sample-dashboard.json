@@ -122,6 +122,7 @@
   ],
   "eval_runs": [
     {
+      "run_id": "840800-88",
       "block": 840800,
       "challenger_uid": 88,
       "challenger_hotkey": "5Hy88zz",
@@ -161,6 +162,7 @@
       }
     },
     {
+      "run_id": "841020-231",
       "block": 841020,
       "challenger_uid": 231,
       "challenger_hotkey": "5GxChal9",
@@ -200,6 +202,7 @@
       }
     },
     {
+      "run_id": "841200-225",
       "block": 841200,
       "challenger_uid": 225,
       "challenger_hotkey": "5CJ2o8dx",

@@ -41,6 +41,7 @@ class DuelRunner:
     king_cache: Dict[Tuple[str, str], SideResult] = field(default_factory=dict)
     cache_hits: int = 0
     cache_misses: int = 0
+    last_records: list = field(default_factory=list)  # per-sample records of the most recent run
 
     def _side(self, sample: CorpusSample, audio: bytes) -> SideResult:
         score, _wer, ok = self.intelligibility.score_side(sample.target_text, audio)
@@ -93,4 +94,5 @@ class DuelRunner:
                     on_error(sample.sample_id, exc)
                 zero = FacetPair(0.0, 0.0)
                 records.append(SampleRecord(sample.sample_id, zero, zero, zero, False, False, scored=False))
+        self.last_records = records
         return aggregate_duel(records, self.spec)

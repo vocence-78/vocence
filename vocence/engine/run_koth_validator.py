@@ -87,7 +87,13 @@ async def run_forever(  # pragma: no cover - live loop (needs chain + GPU)
     the dashboard). Runs until cancelled.
     """
     import asyncio
+    from vocence.pipeline.duel_runner import DuelRunner
 
+    # One persistent runner so the king cache survives across cycles within a reign.
+    duel_runner = DuelRunner(
+        intelligibility=judges.intelligibility, adherence=judges.adherence,
+        naturalness=judges.naturalness, spec=spec,
+    )
     last_ran_window = -1
     while True:
         try:
@@ -97,6 +103,7 @@ async def run_forever(  # pragma: no cover - live loop (needs chain + GPU)
                 report = await run_cycle(
                     chain=chain, validate=validate, make_generator=make_generator,
                     judges=judges, corpus=corpus, spec=spec, genesis_reign=genesis_reign,
+                    duel_runner=duel_runner,
                 )
                 last_ran_window = window
                 if on_report is not None:

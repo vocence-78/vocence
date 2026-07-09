@@ -100,10 +100,14 @@ function detailPanel(r) {
   };
   const boxes = Object.keys(names).map(k => `<div class="fbox"><h4>${names[k]}</h4>${vsRow(f[k])}</div>`).join("");
   const verdict = r.challenger_won ? "challenger crowned" : (r.note || "king held");
+  const link = r.run_id
+    ? `<a class="detail-link" href="detail.html?run=${encodeURIComponent(r.run_id)}">Open full per-sample detail →</a>`
+    : "";
   return `<div class="detailgrid">${boxes}</div>
     <div class="meta-line">composite <b>${(r.composite_challenger ?? 0).toFixed(3)}</b> vs king <b>${(r.composite_king ?? 0).toFixed(3)}</b>
     · margin needed <b>${pct(r.win_margin)}</b> · scored <b>${r.scored_samples}/${r.total_samples}</b>
-    · gate pass <b>${pct(r.gate_pass_rate)}</b> · verdict <b>${verdict}</b></div>`;
+    · gate pass <b>${pct(r.gate_pass_rate)}</b> · verdict <b>${verdict}</b></div>
+    ${link}`;
 }
 
 function renderDuels(d) {

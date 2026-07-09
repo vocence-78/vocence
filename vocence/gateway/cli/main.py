@@ -534,8 +534,8 @@ def serve_koth(corpus_path, seed_config, model_bucket, dashboard_bucket, votes):
     from vocence.engine.run_koth_validator import (
         build_judges, make_generator_factory, make_validator, run_forever,
     )
-    from vocence.gateway.dashboard.model import build_dashboard
-    from vocence.gateway.dashboard.publish import publish_dashboard
+    from vocence.gateway.dashboard.model import build_dashboard, build_run_detail
+    from vocence.gateway.dashboard.publish import publish_dashboard, publish_run_detail
     from vocence.gateway.dashboard.store import ReportStore
     from vocence.shared.logging import emit_log, print_header
 
@@ -568,6 +568,9 @@ def serve_koth(corpus_path, seed_config, model_bucket, dashboard_bucket, votes):
     async def on_report(report):
         report_store.append(report)  # persists (survives restarts); drives the leaderboard
         try:
+            # Per-run detail (albedo-style): every duel is an addressable record.
+            if report.run_id and report.duel is not None:
+                await publish_run_detail(storage, dashboard_bucket, build_run_detail(report, corpus))
             reign = await gateway.resolve_reign()
             data = build_dashboard(
                 spec=spec, block=report.block, reign=reign, runs=report_store.recent(200),

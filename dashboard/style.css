@@ -81,6 +81,12 @@ tr.duel.open .chev { transform: rotate(90deg); }
 .winrate { font-family: var(--mono); font-size: 11px; color: var(--mute); margin-top: 6px; }
 .meta-line { font-size: 12px; color: var(--mute); padding: 0 2px 4px; }
 .meta-line b { color: var(--ink); font-family: var(--mono); }
+.detail-link { display: inline-block; margin: 4px 2px 2px; font-size: 12.5px; color: var(--acc); text-decoration: none; }
+.detail-link:hover { text-decoration: underline; }
+td.text { white-space: normal; max-width: 320px; color: var(--ink); }
+td.chips { white-space: normal; max-width: 260px; }
+.chip { display: inline-block; background: var(--chip); border: 1px solid var(--line); border-radius: 999px;
+  padding: 1px 8px; font-size: 11px; color: var(--mute); margin: 1px 2px; font-family: var(--mono); }
 
 .queue { display: flex; flex-direction: column; gap: 8px; }
 .qrow { display: flex; justify-content: space-between; gap: 10px; background: var(--panel2);

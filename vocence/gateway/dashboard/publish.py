@@ -21,6 +21,10 @@ from vocence.shared.logging import emit_log
 DASHBOARD_OBJECT_KEY = "data/dashboard.json"
 
 
+def run_detail_key(run_id: str) -> str:
+    return f"data/runs/{run_id}.json"
+
+
 async def publish_dashboard(
     client: Minio,
     bucket: str,
@@ -42,3 +46,9 @@ async def publish_dashboard(
         tmp.unlink(missing_ok=True)
     emit_log(f"Published dashboard ({len(payload)} bytes) to {bucket}/{object_key}", "success")
     return object_key
+
+
+async def publish_run_detail(client: Minio, bucket: str, detail: Dict[str, Any]) -> str:
+    """Publish one duel's full detail to data/runs/<run_id>.json. Returns the object key."""
+    run_id = detail.get("run", {}).get("run_id") or "unknown"
+    return await publish_dashboard(client, bucket, detail, object_key=run_detail_key(run_id))

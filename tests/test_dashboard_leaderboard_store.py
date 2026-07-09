@@ -75,3 +75,28 @@ def test_report_store_recent_limit(tmp_path):
     for _ in range(5):
         store.append(_report(False))
     assert len(store.recent(3)) == 3
+
+
+def test_build_run_detail_joins_corpus():
+    from vocence.pipeline.dense_scoring import FacetPair, SampleRecord
+    from vocence.pipeline.duel import CorpusSample
+    from vocence.gateway.dashboard.model import build_run_detail
+
+    recs = [
+        SampleRecord("s0", FacetPair(0.90, 0.95), FacetPair(0.60, 0.80), FacetPair(0.70, 0.72), True, True),
+        SampleRecord("s1", FacetPair(0.93, 0.55), FacetPair(0.62, 0.70), FacetPair(0.71, 0.66), True, False),
+    ]
+    corpus = [CorpusSample("s0", "hello world", {"gender": "female"}),
+              CorpusSample("s1", "another line", {"emotion": "calm"})]
+    report = _report(True)
+    report.run_id = "100-9"
+    report.records = recs
+
+    detail = build_run_detail(report, corpus)
+    assert detail["run"]["run_id"] == "100-9"
+    assert len(detail["samples"]) == 2
+    s0 = detail["samples"][0]
+    assert s0["target_text"] == "hello world"
+    assert s0["traits"]["gender"] == "female"
+    assert s0["facets"]["adherence"]["challenger"] == 0.80
+    assert detail["samples"][1]["challenger_intelligible"] is False
