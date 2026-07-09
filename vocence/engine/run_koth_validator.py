@@ -65,3 +65,49 @@ def make_validator(spec: SubnetSpec, seed_cfg, fetch_model, store: FingerprintSt
         result = assemble_and_validate(local_dir, candidate.repo, spec, seed_cfg=seed_cfg, store=store)
         return result.valid, ("" if result.valid else (result.first_failure.reason if result.first_failure else "invalid"))
     return validate
+
+
+async def run_forever(  # pragma: no cover - live loop (needs chain + GPU)
+    *,
+    chain,
+    validate,
+    make_generator,
+    judges: Judges,
+    corpus: Sequence[CorpusSample],
+    spec: SubnetSpec,
+    poll_seconds: float = 12.0,
+    cycle_length: int = 150,
+    offset: int = 0,
+    on_report=None,
+):
+    """Poll the chain; run one KOTH cycle per weight-set window; emit reports.
+
+    ``on_report(CycleReport)`` is called after each cycle (e.g. to persist and publish
+    the dashboard). Runs until cancelled.
+    """
+    import asyncio
+
+    last_ran_window = -1
+    while True:
+        try:
+            block = await chain.current_block()
+            window = block // cycle_length
+            if window != last_ran_window and should_run_cycle(block, cycle_length, offset):
+                report = await run_cycle(
+                    chain=chain, validate=validate, make_generator=make_generator,
+                    judges=judges, corpus=corpus, spec=spec,
+                )
+                last_ran_window = window
+                if on_report is not None:
+                    await _maybe_await(on_report(report))
+        except Exception as exc:
+            from vocence.shared.logging import emit_log
+            emit_log(f"[koth] cycle error (continuing): {exc}", "error")
+        await asyncio.sleep(poll_seconds)
+
+
+async def _maybe_await(value):  # pragma: no cover
+    import inspect
+    if inspect.isawaitable(value):
+        return await value
+    return value

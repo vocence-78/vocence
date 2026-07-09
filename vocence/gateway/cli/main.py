@@ -478,6 +478,83 @@ def miner_publish(path, name, namespace, bucket, do_commit, coldkey, hotkey, net
     asyncio.run(_run())
 
 
+@cli.command("serve-koth")
+@click.option("--corpus", "corpus_path", required=True, type=click.Path(exists=True, dir_okay=False),
+              help="Pinned eval corpus JSON (target_text + traits per sample).")
+@click.option("--seed-config", "seed_config", default=None, type=click.Path(exists=True, dir_okay=False),
+              help="Genesis seed config.json for the architecture-lock check.")
+@click.option("--model-bucket", default=None, help="Hippius bucket holding submitted models ($VOCENCE_MODEL_BUCKET).")
+@click.option("--dashboard-bucket", default=None, help="Hippius bucket to publish the dashboard to.")
+@click.option("--votes", default=1, type=int, help="Naturalness judge votes per sample (order-swapped).")
+def serve_koth(corpus_path, seed_config, model_bucket, dashboard_bucket, votes):
+    """Run the decentralized KOTH validator loop (model-submission, local GPU eval).
+
+    Reads v7 reveals from chain, validates + duels challengers locally, sets weights,
+    and republishes the dashboard each cycle. Requires a GPU host with the judge/TTS
+    models available. No owner API, no Chutes key.
+    """
+    import os
+    import json
+    import tempfile
+    from datetime import datetime, timezone
+
+    import bittensor as bt
+    from vocence.domain import config as cfg
+    from vocence.domain.spec import load_spec
+    from vocence.pipeline.eval_corpus import load_corpus_file
+    from vocence.pipeline.cache import GenerationCache
+    from vocence.registry.fingerprint import FingerprintStore
+    from vocence.adapters.storage import create_validator_storage_client
+    from vocence.adapters.model_store import download_model
+    from vocence.engine.chain_gateway import BittensorChainGateway
+    from vocence.engine.run_koth_validator import (
+        build_judges, make_generator_factory, make_validator, run_forever,
+    )
+    from vocence.gateway.dashboard.model import build_dashboard
+    from vocence.gateway.dashboard.publish import publish_dashboard
+    from vocence.shared.logging import emit_log, print_header
+
+    spec = load_spec()
+    print_header(f"KOTH validator · {spec.name} netuid {spec.netuid}")
+    model_bucket = model_bucket or os.environ.get("VOCENCE_MODEL_BUCKET", "vocence-models")
+    dashboard_bucket = dashboard_bucket or os.environ.get("VOCENCE_DASHBOARD_BUCKET", "vocence")
+    seed_cfg = json.loads(open(seed_config).read()) if seed_config else {}
+    corpus = load_corpus_file(corpus_path)
+    emit_log(f"Loaded {len(corpus)} corpus samples (min {spec.corpus_min_samples})", "info")
+
+    wallet = bt.Wallet(name=cfg.COLDKEY_NAME, hotkey=cfg.HOTKEY_NAME)
+    gateway = BittensorChainGateway(wallet, network=cfg.CHAIN_NETWORK, netuid=spec.netuid, spec=spec)
+    store = FingerprintStore()
+    cache = GenerationCache()
+    storage = create_validator_storage_client()
+
+    async def fetch_model(repo, digest):
+        dest = tempfile.mkdtemp(prefix="vocence-model-")
+        return await download_model(storage, model_bucket, repo, dest, expected_digest=digest)
+
+    validate = make_validator(spec, seed_cfg, fetch_model, store)
+    make_gen = make_generator_factory(spec, fetch_model, cache)
+    judges = build_judges(spec, votes=votes)
+    reports = []
+
+    async def on_report(report):
+        reports.append(report)
+        try:
+            reign = await gateway.resolve_reign()
+            data = build_dashboard(
+                spec=spec, block=report.block, reign=reign, reports=reports,
+                updated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            )
+            await publish_dashboard(storage, dashboard_bucket, data)
+        except Exception as exc:  # dashboard must never break the loop
+            emit_log(f"dashboard publish failed: {exc}", "warn")
+
+    asyncio.run(run_forever(
+        chain=gateway, validate=validate, make_generator=make_gen, judges=judges,
+        corpus=corpus, spec=spec, cycle_length=cfg.CYCLE_LENGTH, on_report=on_report,
+    ))
+
+
 @cli.group()
 def dashboard():
     """Dashboard commands. The dashboard is a static site (see ./dashboard) that reads
