@@ -9,6 +9,7 @@ wheels/
 # Virtual environments
 .venv
 temp_audio/
+albedo/
 signal_audios/
 vocence.egg-info/
 # Environment files (contain secrets)
@@ -34,3 +35,8 @@ data/
 # Daily serve logs (UTC)
 logs/
 *.wav
+# Internal design/research docs — keep local, never commit
+docs/*.pdf
+docs/albedo-architecture-migration.md
+docs/vocence-whitepaper*
+docs/*whitepaper*.pdf
