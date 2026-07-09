@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vocence · Subnet Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◉</span>
+      <div>
+        <h1>VOCENCE</h1>
+        <p id="subtitle">Decentralized voice-intelligence subnet</p>
+      </div>
+    </div>
+    <div class="meta">
+      <span id="block" class="pill">block —</span>
+      <span id="updated" class="pill muted">updated —</span>
+      <button id="theme" class="pill" title="Toggle theme">◐</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="stats" class="cards" aria-label="Network stats"></section>
+
+    <section class="panel">
+      <h2>Reign · King-of-the-Hill Court</h2>
+      <p class="hint">A challenger must beat the slot-1 king by the win margin to be crowned.
+        The top five kings share emissions.</p>
+      <div id="reign" class="court"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Recent Duels</h2>
+      <p class="hint">Each challenger is scored against the king across three facets:
+        intelligibility (Whisper), prompt-adherence (audio-LLM checklist), naturalness (SpeechJudge-GRM).</p>
+      <div class="table-wrap">
+        <table id="duels">
+          <thead>
+            <tr>
+              <th>Block</th><th>Challenger</th><th>King</th>
+              <th>Composite</th><th>Intelligibility</th><th>Adherence</th><th>Naturalness</th><th>Result</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Submission Queue</h2>
+      <div id="queue" class="queue"></div>
+    </section>
+  </main>
+
+  <footer>
+    <span id="foot">Static dashboard · reads a JSON snapshot published to Hippius · no central API</span>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

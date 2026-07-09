@@ -1,0 +1,186 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-07-09T12:00:00Z",
+  "spec": {
+    "name": "Vocence",
+    "netuid": 78,
+    "win_margin": 0.03,
+    "court_size": 5,
+    "judges": {
+      "intelligibility": "openai/whisper-large-v3",
+      "adherence": "moonshotai/Kimi-Audio-7B-Instruct",
+      "naturalness": "AmphionTeam/SpeechJudge-GRM"
+    }
+  },
+  "chain": {
+    "block": 841600
+  },
+  "reign": [
+    {
+      "slot": 1,
+      "uid": 225,
+      "hotkey": "5CJ2o8dxUrp7K5rhAXMsHHh7xt6rVEsmSwQQrf7xncHb7SoQ",
+      "model_hash": "a1",
+      "repo": "everking/vocence-prompttts-topk",
+      "weight": 0.3334
+    },
+    {
+      "slot": 2,
+      "uid": 112,
+      "hotkey": "5Fk765B4CRBekwErwE5VxvveWhHztHSfsnsLt8cbDayDWsuk",
+      "model_hash": "b2",
+      "repo": "rho/vocence-prompttts-v7",
+      "weight": 0.3333
+    },
+    {
+      "slot": 3,
+      "uid": 48,
+      "hotkey": "5Dvv8aB4CRBekwErwE5VxvveWhHztHSfsnsLt8cbDayDabcd",
+      "model_hash": "c3",
+      "repo": "mira/vocence-prompttts-emo",
+      "weight": 0.3333
+    }
+  ],
+  "current_eval": null,
+  "queue": [
+    {
+      "uid": 301,
+      "hotkey": "5Gx\u2026",
+      "repo": "newminer/vocence-prompttts-a",
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "block": 841500
+    },
+    {
+      "uid": 302,
+      "hotkey": "5Hy\u2026",
+      "repo": "labz/vocence-prompttts-fast",
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "block": 841540
+    }
+  ],
+  "eval_runs": [
+    {
+      "block": 840800,
+      "challenger_uid": 88,
+      "king_uid": 225,
+      "coronated": false,
+      "note": "intelligibility_gate_failed",
+      "weights_uids": [
+        88,
+        225,
+        112,
+        48
+      ],
+      "state": "succeeded",
+      "challenger_won": false,
+      "composite_challenger": 0.68,
+      "composite_king": 0.742,
+      "win_margin": 0.03,
+      "scored_samples": 126,
+      "total_samples": 128,
+      "gate_pass_rate": 0.98,
+      "facets": {
+        "intelligibility": {
+          "king": 0.93,
+          "challenger": 0.6,
+          "challenger_win_rate": 0.2
+        },
+        "adherence": {
+          "king": 0.62,
+          "challenger": 0.71,
+          "challenger_win_rate": 0.61
+        },
+        "naturalness": {
+          "king": 0.71,
+          "challenger": 0.66,
+          "challenger_win_rate": 0.44
+        }
+      }
+    },
+    {
+      "block": 841020,
+      "challenger_uid": 231,
+      "king_uid": 225,
+      "coronated": false,
+      "note": "",
+      "weights_uids": [
+        231,
+        225,
+        112,
+        48
+      ],
+      "state": "succeeded",
+      "challenger_won": false,
+      "composite_challenger": 0.7365,
+      "composite_king": 0.7262,
+      "win_margin": 0.03,
+      "scored_samples": 126,
+      "total_samples": 128,
+      "gate_pass_rate": 0.98,
+      "facets": {
+        "intelligibility": {
+          "king": 0.94,
+          "challenger": 0.94,
+          "challenger_win_rate": 0.5
+        },
+        "adherence": {
+          "king": 0.7,
+          "challenger": 0.72,
+          "challenger_win_rate": 0.55
+        },
+        "naturalness": {
+          "king": 0.73,
+          "challenger": 0.735,
+          "challenger_win_rate": 0.52
+        }
+      }
+    },
+    {
+      "block": 841200,
+      "challenger_uid": 225,
+      "king_uid": 199,
+      "coronated": true,
+      "note": "",
+      "weights_uids": [
+        225,
+        225,
+        112,
+        48
+      ],
+      "state": "succeeded",
+      "challenger_won": true,
+      "composite_challenger": 0.781,
+      "composite_king": 0.742,
+      "win_margin": 0.03,
+      "scored_samples": 126,
+      "total_samples": 128,
+      "gate_pass_rate": 0.98,
+      "facets": {
+        "intelligibility": {
+          "king": 0.93,
+          "challenger": 0.95,
+          "challenger_win_rate": 0.6
+        },
+        "adherence": {
+          "king": 0.62,
+          "challenger": 0.79,
+          "challenger_win_rate": 0.74
+        },
+        "naturalness": {
+          "king": 0.71,
+          "challenger": 0.78,
+          "challenger_win_rate": 0.69
+        }
+      }
+    }
+  ],
+  "stats": {
+    "eval_runs": 3,
+    "coronations": 1,
+    "court_size": 3,
+    "queue_depth": 2,
+    "registered_miners": 107,
+    "valid_models": 41
+  },
+  "fails": []
+}
