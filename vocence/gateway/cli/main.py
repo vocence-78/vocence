@@ -478,5 +478,37 @@ def miner_publish(path, name, namespace, bucket, do_commit, coldkey, hotkey, net
     asyncio.run(_run())
 
 
+@cli.group()
+def dashboard():
+    """Dashboard commands. The dashboard is a static site (see ./dashboard) that reads
+    a JSON snapshot published to Hippius — there is no dashboard API server."""
+
+
+@dashboard.command("publish")
+@click.option("--file", "file", required=True, type=click.Path(exists=True, dir_okay=False),
+              help="Dashboard JSON to upload (build it from validator state).")
+@click.option("--bucket", "bucket", default=None, help="Hippius bucket (default $VOCENCE_DASHBOARD_BUCKET or 'vocence').")
+@click.option("--key", "key", default=None, help="Object key (default data/dashboard.json).")
+def dashboard_publish(file, bucket, key):
+    """Upload a dashboard JSON snapshot to Hippius for the static frontend to read."""
+    import os
+    import json as _json
+    from vocence.adapters.storage import create_validator_storage_client
+    from vocence.gateway.dashboard.publish import publish_dashboard, DASHBOARD_OBJECT_KEY
+    from vocence.shared.logging import emit_log
+
+    bucket = bucket or os.environ.get("VOCENCE_DASHBOARD_BUCKET", "vocence")
+    key = key or DASHBOARD_OBJECT_KEY
+    with open(file) as fh:
+        data = _json.load(fh)
+
+    async def _run():
+        client = create_validator_storage_client()
+        written = await publish_dashboard(client, bucket, data, object_key=key)
+        emit_log(f"Dashboard live at <hippius>/{bucket}/{written}", "success")
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
     cli()
