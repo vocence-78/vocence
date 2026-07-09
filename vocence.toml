@@ -63,15 +63,25 @@ similarity_threshold = 0.95
 
 [incentive]
 # Top-5 equal-split king-of-the-hill court (see whitepaper §7).
-win_margin = 0.03      # composite gap a challenger must exceed to crown
 court_size = 5         # max simultaneous kings sharing emissions
 burn_uid = 0           # receives weight when the court is empty
+# Dynamic margin (teutonic-style): required lead scales with the king's remaining
+# headroom so the hill stays winnable as quality saturates.
+#   margin_t = max(min_margin, margin_coefficient * (1 - king_composite))
+margin_coefficient = 0.10   # fraction of the king's remaining headroom to beat
+min_margin = 0.005          # absolute floor so the bar never collapses into noise
+win_margin = 0.03           # legacy/reference only; effective bar is margin_t
 
 [eval]
 corpus_min_samples = 128
 # Intelligibility is a hard gate as well as a scored facet.
 intelligibility_max_wer = 0.15
 adherence_questions_per_sample = 50
+# Paired bootstrap on per-sample composite deltas; crown iff the lower confidence
+# bound clears margin_t. Fixed seed => every honest validator computes the same LCB.
+bootstrap_n = 2000
+bootstrap_alpha = 0.05      # LCB percentile (5% => 95% one-sided confidence)
+bootstrap_seed = 3151662    # pinned across validators for reproducibility
 # Facet weights for the composite score (must sum to 1.0).
 [eval.facet_weights]
 intelligibility = 0.20

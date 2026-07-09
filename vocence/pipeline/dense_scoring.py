@@ -65,8 +65,33 @@ class DuelResult:
     scored_samples: int = 0
     total_samples: int = 0
     challenger_gate_pass_rate: float = 0.0
-    win_margin: float = 0.0
+    win_margin: float = 0.0       # effective (dynamic) margin_t used for this duel
+    lcb: Optional[float] = None   # bootstrap lower-confidence-bound on the composite delta
     reason: str = ""
+
+
+def _composite(pairs: Dict[str, float], spec: SubnetSpec) -> float:
+    return sum(spec.facet_weight(name) * pairs[name] for name in FACETS)
+
+
+def bootstrap_lcb(deltas: Sequence[float], *, n_boot: int, alpha: float, seed: int) -> float:
+    """Lower confidence bound on the mean of per-sample composite deltas.
+
+    Paired bootstrap with a **fixed seed** so every honest validator computes the same
+    LCB from the same deltas. Returns the ``alpha`` quantile of the bootstrap means —
+    a conservative estimate of the challenger's true advantage that rejects noisy wins.
+    """
+    import numpy as np
+
+    d = np.asarray(list(deltas), dtype=np.float64)
+    if d.size == 0:
+        return 0.0
+    if d.size == 1:
+        return float(d[0])
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, d.size, size=(int(n_boot), d.size))
+    means = d[idx].mean(axis=1)
+    return float(np.quantile(means, alpha))
 
 
 def _win_rate(records: Sequence[SampleRecord], facet: str) -> float:
@@ -119,11 +144,24 @@ def aggregate_duel(
     comp_king = round(comp_king, 6)
     comp_chal = round(comp_chal, 6)
 
+    # Per-sample composite deltas -> bootstrap LCB (variance-adaptive, reproducible).
+    deltas = [
+        _composite({n: r.facet(n).challenger for n in FACETS}, spec)
+        - _composite({n: r.facet(n).king for n in FACETS}, spec)
+        for r in valid
+    ]
+    lcb = round(bootstrap_lcb(deltas, n_boot=spec.bootstrap_n, alpha=spec.bootstrap_alpha,
+                              seed=spec.bootstrap_seed), 6)
+
+    # Dynamic margin: a fraction of the king's remaining headroom, floored.
+    margin_t = round(spec.margin_for(comp_king), 6)
+
     gate_pass_rate = round(mean(1.0 if r.challenger_intelligible else 0.0 for r in valid), 6)
     gated_out = gate_pass_rate < gate_min_pass_rate
 
-    won = (not gated_out) and ((comp_chal - comp_king) >= spec.win_margin)
-    reason = "intelligibility_gate_failed" if gated_out else ""
+    # Crown iff the challenger passes the gate AND its bootstrap LCB clears margin_t.
+    won = (not gated_out) and (lcb > margin_t)
+    reason = "intelligibility_gate_failed" if gated_out else ("" if won else "lcb_below_margin")
 
     return DuelResult(
         state="succeeded",
@@ -134,6 +172,7 @@ def aggregate_duel(
         scored_samples=len(valid),
         total_samples=total,
         challenger_gate_pass_rate=gate_pass_rate,
-        win_margin=spec.win_margin,
+        win_margin=margin_t,
+        lcb=lcb,
         reason=reason,
     )

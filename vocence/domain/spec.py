@@ -49,12 +49,22 @@ class SubnetSpec:
     win_margin: float
     court_size: int
     burn_uid: int
+    margin_coefficient: float
+    min_margin: float
     # [eval]
     corpus_min_samples: int
     intelligibility_max_wer: float
     adherence_questions_per_sample: int
+    bootstrap_n: int
+    bootstrap_alpha: float
+    bootstrap_seed: int
     facet_weights: Dict[str, float]
     judges: Dict[str, str]
+
+    def margin_for(self, king_composite: float) -> float:
+        """Dynamic coronation margin: a fraction of the king's remaining headroom,
+        floored at ``min_margin`` (see teutonic ``δ_t = c·king_loss``)."""
+        return max(self.min_margin, self.margin_coefficient * (1.0 - float(king_composite)))
 
     def facet_weight(self, facet: str) -> float:
         return float(self.facet_weights.get(facet, 0.0))
@@ -103,9 +113,14 @@ def _build(raw: dict) -> SubnetSpec:
         win_margin=float(incentive.get("win_margin", 0.03)),
         court_size=int(incentive.get("court_size", 5)),
         burn_uid=int(incentive.get("burn_uid", 0)),
+        margin_coefficient=float(incentive.get("margin_coefficient", 0.10)),
+        min_margin=float(incentive.get("min_margin", 0.005)),
         corpus_min_samples=int(ev.get("corpus_min_samples", 128)),
         intelligibility_max_wer=float(ev.get("intelligibility_max_wer", 0.15)),
         adherence_questions_per_sample=int(ev.get("adherence_questions_per_sample", 50)),
+        bootstrap_n=int(ev.get("bootstrap_n", 2000)),
+        bootstrap_alpha=float(ev.get("bootstrap_alpha", 0.05)),
+        bootstrap_seed=int(ev.get("bootstrap_seed", 3151662)),
         facet_weights=facet_weights,
         judges=judges,
     )
