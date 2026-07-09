@@ -478,6 +478,30 @@ def miner_publish(path, name, namespace, bucket, do_commit, coldkey, hotkey, net
     asyncio.run(_run())
 
 
+@cli.group()
+def corpus():
+    """Evaluation-corpus commands. The corpus is deterministic and pinned by hash in
+    vocence.toml so every validator evaluates identical prompts."""
+
+
+@corpus.command("build")
+@click.option("--out", "out", required=True, type=click.Path(dir_okay=False), help="Output JSON path.")
+@click.option("--n", "n", default=128, type=int, help="Number of samples (>= spec corpus_min_samples).")
+def corpus_build(out, n):
+    """Generate the deterministic eval corpus and print its pinned hash."""
+    from pathlib import Path
+    from vocence.pipeline.corpus_builder import build_corpus, serialize_corpus
+    from vocence.pipeline.eval_corpus import corpus_hash
+    from vocence.shared.logging import emit_log
+
+    raw = serialize_corpus(build_corpus(n))
+    Path(out).write_bytes(raw)
+    h = corpus_hash(raw)
+    emit_log(f"Wrote {n} samples to {out}", "success")
+    emit_log(f"corpus hash: {h}", "info")
+    emit_log("Pin this under [eval] corpus_hash in vocence.toml and publish the file to Hippius.", "info")
+
+
 @cli.command("serve-koth")
 @click.option("--corpus", "corpus_path", required=True, type=click.Path(exists=True, dir_okay=False),
               help="Pinned eval corpus JSON (target_text + traits per sample).")
