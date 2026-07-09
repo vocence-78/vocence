@@ -565,9 +565,23 @@ def serve_koth(corpus_path, seed_config, model_bucket, dashboard_bucket, votes):
     make_gen = make_generator_factory(spec, fetch_model, cache)
     judges = build_judges(spec, votes=votes)
     report_store = ReportStore(os.path.join(os.getcwd(), "data", "koth_reports.jsonl"))
+    from vocence.engine.king_commit import KingStateStore, KingRef
+    from vocence.adapters.deployment import commit_king_command
+    king_store = KingStateStore(os.path.join(os.getcwd(), "data", "king.json"))
 
     async def on_report(report):
         report_store.append(report)  # persists (survives restarts); drives the leaderboard
+        if report.coronated and report.challenger_digest:
+            # Record the new king explicitly (on-chain source of truth + local recovery).
+            king = KingRef(uid=report.challenger_uid, hotkey=report.challenger_hotkey,
+                           repo=report.challenger_repo, digest=report.challenger_digest, block=report.block)
+            king_store.save(king)
+            try:
+                await commit_king_command(repo=king.repo, digest=king.digest, uid=king.uid,
+                                          hotkey=king.hotkey, block=king.block,
+                                          chain_network=cfg.CHAIN_NETWORK, subnet_id=spec.netuid)
+            except Exception as exc:
+                emit_log(f"king commit failed: {exc}", "warn")
         try:
             # Per-run detail (albedo-style): every duel is an addressable record.
             if report.run_id and report.duel is not None:

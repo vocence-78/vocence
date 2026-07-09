@@ -62,6 +62,7 @@ class CycleReport:
     note: str = ""
     challenger_hotkey: str = ""
     challenger_repo: str = ""
+    challenger_digest: str = ""
     run_id: str = ""
     records: list = field(default_factory=list)  # per-sample SampleRecords (in-memory; for run-detail publishing)
 
@@ -134,4 +135,4 @@ async def run_cycle(
     await chain.set_weights(uids, weights)
     return CycleReport(block, reign_uids, candidate.uid, coronated, uids, weights, duel=result,
                        challenger_hotkey=candidate.hotkey, challenger_repo=candidate.repo,
-                       run_id=run_id, records=records)
+                       challenger_digest=candidate.digest, run_id=run_id, records=records)

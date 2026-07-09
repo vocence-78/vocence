@@ -301,6 +301,40 @@ async def synthesize(self, args: TTSArgs):
         return {"success": False, "error": str(e)}
 
 
+async def commit_king_command(
+    repo: str,
+    digest: str,
+    uid: int,
+    hotkey: str,
+    *,
+    block: int = 0,
+    coldkey: Optional[str] = None,
+    validator_hotkey: Optional[str] = None,
+    chain_network: Optional[str] = None,
+    subnet_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Record the reigning king on-chain via set_commitment (source of truth + recovery).
+
+    Payload: ``king1|uid|hotkey|repo|digest|block`` (see engine.king_commit).
+    """
+    import bittensor as bt
+    from vocence.engine.king_commit import KingRef, format_king_commitment
+
+    network = chain_network if chain_network is not None else CHAIN_NETWORK
+    netuid = subnet_id if subnet_id is not None else SUBNET_ID
+    wallet = bt.Wallet(name=coldkey or COLDKEY_NAME, hotkey=validator_hotkey or HOTKEY_NAME)
+    payload = format_king_commitment(KingRef(uid=uid, hotkey=hotkey, repo=repo, digest=digest, block=block))
+
+    try:
+        subtensor = bt.AsyncSubtensor(network=network)
+        await subtensor.set_reveal_commitment(wallet=wallet, netuid=netuid, data=payload, blocks_until_reveal=1)
+        emit_log(f"Committed king on-chain: {payload}", "success")
+        return {"success": True, "king": payload}
+    except Exception as e:  # noqa: BLE001
+        emit_log(f"King commit failed: {e}", "error")
+        return {"success": False, "error": str(e)}
+
+
 async def commit_reveal_command(
     repo: str,
     digest: str,
