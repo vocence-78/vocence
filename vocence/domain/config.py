@@ -44,7 +44,7 @@ VALIDATOR_ID = int(os.environ.get("VALIDATOR_ID", "1"))  # 0–4 for staggered s
 SAMPLE_SLOT_INTERVAL_BLOCKS = int(os.environ.get("SAMPLE_SLOT_INTERVAL_BLOCKS", "150"))
 # Derived: block % INTERVAL == this value → run sample round
 SAMPLE_SLOT_OFFSET_BLOCKS = (VALIDATOR_ID % 6) * 25  # 0, 25, 50, 75, 100, 125
-MIN_EVALS_TO_COMPETE = int(os.environ.get("MIN_EVALS_TO_COMPETE", "40"))  # Miner must have more than this many evals in at least 3 validator buckets to be globally eligible
+MIN_EVALS_TO_COMPETE = int(os.environ.get("MIN_EVALS_TO_COMPETE", "40"))  # Miner must have more than this many evals in at least MIN_VALIDATOR_APPEARANCES_FOR_ELIGIBILITY validator buckets to be globally eligible
 THRESHOLD_MARGIN = 0.02
 # Block height after which on-chain commits are recognized at all. Any commit at a
 # block < COMMIT_LOCK_BLOCK is ignored entirely — not counted toward the per-hotkey
@@ -123,12 +123,13 @@ MAX_PARALLEL_MINERS = int(os.environ.get("MAX_PARALLEL_MINERS", "20"))
 # Max concurrent OpenAI evaluations (forced-choice) per round. Lower if you hit OpenAI rate limits.
 MAX_PARALLEL_EVALS = int(os.environ.get("MAX_PARALLEL_EVALS", "4"))
 VALIDATOR_BUCKETS_JSON = os.environ.get("VALIDATOR_BUCKETS_JSON", "")
-MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING = int(
-    os.environ.get("MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING", "3")
-)
-MIN_VALIDATOR_APPEARANCES_FOR_ELIGIBILITY = int(
-    os.environ.get("MIN_VALIDATOR_APPEARANCES_FOR_ELIGIBILITY", "3")
-)
+# Hardcoded (NOT env-configurable) on purpose: these gate winner selection, so
+# every validator must use the identical value or they crown different winners
+# and split consensus weight. Reading them from env would let one operator's .env
+# diverge. Set to 2 to match the current active validator count; bump back toward
+# 3 here (in code, then rebuild the image) as more validators come online.
+MIN_ACTIVE_VALIDATORS_FOR_GLOBAL_SCORING = 2
+MIN_VALIDATOR_APPEARANCES_FOR_ELIGIBILITY = 2
 MIN_EVALS_PER_VALIDATOR_FOR_GLOBAL_SCORE = int(
     os.environ.get("MIN_EVALS_PER_VALIDATOR_FOR_GLOBAL_SCORE", "1")
 )
