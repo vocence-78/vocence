@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "python-dotenv>=1.0.0",
     "aiohttp",
-    "bittensor==9.12.2",
+    "bittensor==10.5.0",
     "requests",
     "huggingface-hub",
     "minio",
@@ -27,7 +27,7 @@ dependencies = [
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
     # Miner cli
-    "chutes",
+    "chutes==0.6.11rc2",
     "soundfile",
 ]
 

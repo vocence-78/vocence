@@ -216,14 +216,18 @@ def get_miners():
 
     from vocence.domain.config import SUBNET_ID, CHAIN_NETWORK, COMMIT_LOCK_BLOCK
     from vocence.shared.logging import emit_log, print_header
-    from vocence.adapters.chain import parse_commitment, validate_commitment_fields
+    from vocence.adapters.chain import (
+        parse_commitment,
+        validate_commitment_fields,
+        fetch_all_revealed_commitments,
+    )
 
     async def run():
         print_header("Vocence Miners")
 
         subtensor = bt.AsyncSubtensor(network=CHAIN_NETWORK)
         current_block = await subtensor.get_current_block()
-        commits = await subtensor.get_all_revealed_commitments(SUBNET_ID, block=current_block)
+        commits = await fetch_all_revealed_commitments(subtensor, SUBNET_ID, block=current_block)
 
         if not commits:
             emit_log("No miner commitments found", "warn")
