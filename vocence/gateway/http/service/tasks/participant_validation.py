@@ -30,7 +30,11 @@ from vocence.domain.config import (
 )
 from vocence.registry.persistence.repositories.miner_repository import MinerRepository
 from vocence.registry.persistence.repositories.blocklist_repository import BlocklistRepository
-from vocence.adapters.chain import parse_commitment, validate_commitment_fields
+from vocence.adapters.chain import (
+    parse_commitment,
+    validate_commitment_fields,
+    fetch_all_revealed_commitments,
+)
 from vocence.domain.entities import ParticipantInfo
 from vocence.registry.validation import validate_miner, detect_duplicates, detect_tensor_duplicates
 from vocence.gateway.http.service.endpoints.status import record_last_sync
@@ -95,7 +99,7 @@ class ParticipantValidationTask:
             # Pin to the given block (so independent validators read the same snapshot)
             # or fall back to the current block.
             snapshot_block = block if block is not None else await subtensor.get_current_block()
-            commits = await subtensor.get_all_revealed_commitments(SUBNET_ID, block=snapshot_block)
+            commits = await fetch_all_revealed_commitments(subtensor, SUBNET_ID, block=snapshot_block)
 
             if not commits:
                 emit_log("No participant commitments found (will still inject owner base model if configured)", "warn")

@@ -11,7 +11,7 @@ import hashlib
 from typing import Dict, Any, List, Optional
 
 import aiohttp
-from substrateinterface import Keypair
+from bittensor_wallet import Keypair
 
 from vocence.shared.logging import emit_log
 from vocence.domain.entities import ParticipantInfo

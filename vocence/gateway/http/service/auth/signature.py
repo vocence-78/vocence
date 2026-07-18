@@ -13,7 +13,7 @@ from collections import OrderedDict
 from typing import Optional, Tuple, Annotated
 
 from fastapi import HTTPException, Header, Request, Depends
-from substrateinterface import Keypair
+from bittensor_wallet import Keypair
 
 from vocence.shared.logging import emit_log
 from vocence.domain.config import SIGNATURE_EXPIRY_SECONDS, ADMIN_HOTKEYS
@@ -107,7 +107,7 @@ class RequestVerifier:
             # Create message to verify: hash of (body + timestamp + nonce)
             message = self._build_message(body, timestamp, nonce)
             
-            # Verify using substrateinterface
+            # Verify using bittensor_wallet Keypair (sr25519)
             keypair = Keypair(ss58_address=hotkey)
             
             # Remove 0x prefix if present
